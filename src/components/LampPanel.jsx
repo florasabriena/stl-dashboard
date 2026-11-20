@@ -4,14 +4,18 @@ import { getLampColors } from '../lib/fsm.js';
 
 /**
  * LampPanel
- * Menampilkan tabel grup lampu fisik (TLA, TLB, TLC) dan GPIO ESP32.
- * Aturan proyek:
- * - Lampu fisik hanya 3 grup: TLA (TL1+TL2), TLB (TL5+TL6), TLC (TL3+TL4).
- * - Total 3 modul LED (9 GPIO) dan LCD 16x2 I2C.
- * - Kepala lampu TL1 dan TL2 mengikuti TLA, TL5 dan TL6 mengikuti TLB, TL3 dan TL4 mengikuti TLC.
+ * Menampilkan grup lampu fisik TLA, TLB, TLC dan pemetaan GPIO ESP32.
+ * Warna lampu TLA/TLB/TLC diwarnai dari state memakai tabel di constants.js.
+ * Tangani kondisi "UNKNOWN".
  */
-export default function LampPanel({ fsmState }) {
-  const lampColors = getLampColors(fsmState ? fsmState.stateCode : 'STARTUP_ALL_RED');
+export default function LampPanel({ fsmState, mode = 'simulasi', liveEsp32Status = null }) {
+  const isConnectedMode = mode === 'terhubung';
+  const currentStateCode = isConnectedMode
+    ? liveEsp32Status?.state || 'UNKNOWN'
+    : fsmState?.stateCode || 'STARTUP_ALL_RED';
+
+  // Ambil warna lampu dari tabel konstanta
+  const lampColors = getLampColors(currentStateCode);
 
   const groups = [
     {
@@ -52,7 +56,7 @@ export default function LampPanel({ fsmState }) {
           </p>
         </div>
         <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-surface-2 text-text-muted">
-          Firmware ESP32
+          {isConnectedMode ? `State: ${currentStateCode}` : 'Firmware ESP32'}
         </span>
       </div>
 
@@ -125,7 +129,7 @@ export default function LampPanel({ fsmState }) {
         <span>
           LCD 16x2 I2C: SDA (GPIO {HARDWARE_CONFIG.lcdI2C.sda}), SCL (GPIO {HARDWARE_CONFIG.lcdI2C.scl}) · Alamat {HARDWARE_CONFIG.lcdI2C.address}
         </span>
-        <span className="font-mono text-text-muted">Urutan fase: A → B → C</span>
+        <span className="font-mono text-text-muted">Urutan normal: A → B → C</span>
       </div>
     </div>
   );

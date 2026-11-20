@@ -23,6 +23,8 @@ import { getLampColors } from '../lib/fsm.js';
  */
 export default function IntersectionSim({
   fsmState,
+  mode = 'simulasi',
+  liveEsp32Status = null,
   simSpeed = 1,
   isPaused = false,
   activeAmbulance = null,
@@ -139,7 +141,13 @@ export default function IntersectionSim({
 
   // Update posisi kendaraan & ambulans
   const updateSimulation = (dt) => {
-    const lampColors = getLampColors(fsmState ? fsmState.stateCode : 'STARTUP_ALL_RED');
+    const currentStateCode =
+      mode === 'terhubung'
+        ? liveEsp32Status?.state || 'UNKNOWN'
+        : fsmState
+        ? fsmState.stateCode
+        : 'STARTUP_ALL_RED';
+    const lampColors = getLampColors(currentStateCode);
     const spawnRate = SIMULATION_PARAMS.spawnRates[trafficScenario] || 0.07;
 
     // Spawn kendaraan acak
@@ -364,7 +372,13 @@ export default function IntersectionSim({
     drawZebraCrossings(ctx);
 
     // 5. Kepala Lampu TL1 - TL6
-    const lampColors = getLampColors(fsmState ? fsmState.stateCode : 'STARTUP_ALL_RED');
+    const currentStateCode =
+      mode === 'terhubung'
+        ? liveEsp32Status?.state || 'UNKNOWN'
+        : fsmState
+        ? fsmState.stateCode
+        : 'STARTUP_ALL_RED';
+    const lampColors = getLampColors(currentStateCode);
     drawTrafficLights(ctx, lampColors);
 
     // 6. Gambar Kendaraan Umum
@@ -675,59 +689,61 @@ export default function IntersectionSim({
         </div>
 
         {/* Tombol Panggil Ambulans dari 4 Arah (Hanya Mode Simulasi) */}
-        <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-bold text-text-main flex items-center gap-1.5">
-              <span>🚑</span> Panggil Ambulans (simulasi)
-            </span>
-            <span className="text-[10px] text-text-muted">
-              Pilih ARAH kedatangan ambulans
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-            {['Utara', 'Selatan', 'Timur', 'Barat'].map((dir) => {
-              const info = DIRECTION_TO_PHASE[dir];
-              const isCurrentActive = activeAmbulance && activeAmbulance.direction === dir;
-
-              return (
-                <button
-                  key={dir}
-                  type="button"
-                  disabled={!!activeAmbulance}
-                  onClick={() => onCallAmbulance && onCallAmbulance(dir)}
-                  className={`p-2 rounded-lg border text-center transition-all ${
-                    isCurrentActive
-                      ? 'border-error bg-error text-white font-bold'
-                      : activeAmbulance
-                      ? 'border-border-line bg-surface opacity-50 cursor-not-allowed text-text-muted'
-                      : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium'
-                  }`}
-                >
-                  <div className="font-bold">{dir}</div>
-                  <div className="text-[10px] text-text-muted truncate">
-                    {info.lane} → Fase {info.targetPhase}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-
-          {activeAmbulance && (
-            <div className="mt-2.5 pt-2 border-t border-border-line flex items-center justify-between">
-              <span className="text-xs text-error font-medium">
-                Ambulans aktif dari arah {activeAmbulance.direction} (Fase {DIRECTION_TO_PHASE[activeAmbulance.direction]?.targetPhase})
+        {mode === 'simulasi' && (
+          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-text-main flex items-center gap-1.5">
+                <span>🚑</span> Panggil Ambulans (simulasi)
               </span>
-              <button
-                type="button"
-                onClick={onCancelAmbulance}
-                className="px-3 py-1 rounded-md bg-error/10 border border-error/40 text-error hover:bg-error/20 text-xs font-bold transition-colors"
-              >
-                Batalkan Panggilan
-              </button>
+              <span className="text-[10px] text-text-muted">
+                Pilih ARAH kedatangan ambulans
+              </span>
             </div>
-          )}
-        </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              {['Utara', 'Selatan', 'Timur', 'Barat'].map((dir) => {
+                const info = DIRECTION_TO_PHASE[dir];
+                const isCurrentActive = activeAmbulance && activeAmbulance.direction === dir;
+
+                return (
+                  <button
+                    key={dir}
+                    type="button"
+                    disabled={!!activeAmbulance}
+                    onClick={() => onCallAmbulance && onCallAmbulance(dir)}
+                    className={`p-2 rounded-lg border text-center transition-all ${
+                      isCurrentActive
+                        ? 'border-error bg-error text-white font-bold'
+                        : activeAmbulance
+                        ? 'border-border-line bg-surface opacity-50 cursor-not-allowed text-text-muted'
+                        : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium'
+                    }`}
+                  >
+                    <div className="font-bold">{dir}</div>
+                    <div className="text-[10px] text-text-muted truncate">
+                      {info.lane} → Fase {info.targetPhase}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {activeAmbulance && (
+              <div className="mt-2.5 pt-2 border-t border-border-line flex items-center justify-between">
+                <span className="text-xs text-error font-medium">
+                  Ambulans aktif dari arah {activeAmbulance.direction} (Fase {DIRECTION_TO_PHASE[activeAmbulance.direction]?.targetPhase})
+                </span>
+                <button
+                  type="button"
+                  onClick={onCancelAmbulance}
+                  className="px-3 py-1 rounded-md bg-error/10 border border-error/40 text-error hover:bg-error/20 text-xs font-bold transition-colors"
+                >
+                  Batalkan Panggilan
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -2,11 +2,34 @@ import React from 'react';
 
 /**
  * PipelineBar
- * Menampilkan 5 tahap jalur data prioritas ambulans (simulasi).
- * Alur: Deteksi -> Firebase -> Backend -> Serial -> ESP32 -> Respons.
- * Catatan: Fitur prioritas ambulans dan SET_PHASE/DONE hanya ada di mode Simulasi, berlabel "simulasi".
+ * Menampilkan lima tahap jalur data prioritas ambulans (simulasi).
+ * Catatan penting:
+ * - Tidak ada tampilan prioritas ambulans di mode Terhubung (FR-06 & firebase-schema.md).
+ * - Di mode Terhubung, panel ini menginformasikan bahwa prioritas ambulans hanya aktif di mode simulasi.
  */
-export default function PipelineBar({ activeStep = 0, isPriorityActive = false }) {
+export default function PipelineBar({ activeStep = 0, isPriorityActive = false, mode = 'simulasi' }) {
+  const isConnectedMode = mode === 'terhubung';
+
+  if (isConnectedMode) {
+    return (
+      <div className="rounded-xl border border-border-line bg-surface p-4 shadow-xs">
+        <div className="flex items-center justify-between mb-2 border-b border-border-line pb-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+            Jalur Data Sistem
+          </h3>
+          <span className="text-[10px] text-text-muted font-mono bg-surface-2 px-2 py-0.5 rounded-full">
+            Read-Only
+          </span>
+        </div>
+        <p className="text-xs text-text-muted leading-relaxed">
+          Mode Terhubung beroperasi dalam mode baca-saja (baca <code>/esp32/status</code>,{' '}
+          <code>/backend/status</code>, dan <code>/responses</code>). Fitur prioritas ambulans{' '}
+          belum diimplementasikan pada firmware/backend fisik dan hanya tersedia pada <strong>Mode Simulasi</strong>.
+        </p>
+      </div>
+    );
+  }
+
   const stages = [
     { id: 1, label: '1. Deteksi', desc: 'YOLOv8n / Pilihan Arah' },
     { id: 2, label: '2. Firebase', desc: 'Tulis /commands' },

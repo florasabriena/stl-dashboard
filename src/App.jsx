@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ConnectionBar from './components/ConnectionBar';
 import StatusCard from './components/StatusCard';
 import LampPanel from './components/LampPanel';
@@ -19,6 +19,14 @@ import {
   SIMULATION_PARAMS,
   MAP_CONFIG,
 } from './config/constants';
+import {
+  subscribeToFirebaseConnection,
+  subscribeToEsp32Status,
+  subscribeToBackendStatus,
+  subscribeToCommands,
+  subscribeToResponses,
+  buildConnectedLogList,
+} from './lib/liveData';
 
 function formatTimestamp() {
   const d = new Date();
@@ -56,12 +64,12 @@ export default function App() {
   const [simSpeed, setSimSpeed] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
 
-  // Status Jalur Data & Ambulans
+  // Status Jalur Data & Ambulans (Simulasi)
   const [pipelineStep, setPipelineStep] = useState(0);
   const [activeAmbulance, setActiveAmbulance] = useState(null);
   const ambulanceTimersRef = useRef([]);
 
-  // Log sistem
+  // Log simulasi
   const [logs, setLogs] = useState(() => [
     {
       time: formatTimestamp(),
@@ -77,6 +85,26 @@ export default function App() {
     },
   ]);
 
+  // Status Live Firebase Realtime Database (Hanya-Baca)
+  const [firebaseConnected, setFirebaseConnected] = useState(false);
+  const [liveEsp32Status, setLiveEsp32Status] = useState(null);
+  const [liveBackendStatus, setLiveBackendStatus] = useState(null);
+  const [liveCommands, setLiveCommands] = useState([]);
+  const [liveResponses, setLiveResponses] = useState([]);
+
+  // Hitung mundur lokal dan umur data
+  const [localCountdown, setLocalCountdown] = useState(null);
+  const [esp32Age, setEsp32Age] = useState(0);
+  const [backendAge, setBackendAge] = useState(0);
+
+  const rawRemainingSecondsRef = useRef(null);
+  const esp32ReceivedAtRef = useRef(null);
+  const lastEsp32UpdatedAtRef = useRef(null);
+  const lastEsp32ChangeTimeRef = useRef(null);
+
+  const lastBackendSeenRef = useRef(null);
+  const lastBackendChangeTimeRef = useRef(null);
+
   const prevStateCodeRef = useRef(fsmState.stateCode);
 
   const addLog = useCallback((type, msg, isSim = true) => {
@@ -87,11 +115,101 @@ export default function App() {
         msg,
         isSimulation: isSim,
       },
-      ...prev.slice(0, 99), // Simpan 100 log terakhir
+      ...prev.slice(0, 99),
     ]);
   }, []);
 
-  // Loop Timer Simulasi FSM (60 FPS atau interval 100ms)
+  // 1. Pasang Listener HANYA-BACA ke Firebase RTDB
+  useEffect(() => {
+    // a. Status koneksi socket Firebase (.info/connected)
+    const unsubConn = subscribeToFirebaseConnection((conn) => {
+      setFirebaseConnected(conn);
+    });
+
+    // b. Status ESP32 (/esp32/status)
+    const unsubEsp32 = subscribeToEsp32Status((data) => {
+      setLiveEsp32Status(data);
+      if (data) {
+        // Deteksi perubahan updated_at di browser
+        if (data.updated_at !== lastEsp32UpdatedAtRef.current) {
+          lastEsp32UpdatedAtRef.current = data.updated_at;
+          lastEsp32ChangeTimeRef.current = Date.now();
+        }
+        rawRemainingSecondsRef.current = data.remaining_seconds;
+        esp32ReceivedAtRef.current = data.receivedAt;
+      }
+    });
+
+    // c. Status Backend (/backend/status)
+    const unsubBackend = subscribeToBackendStatus((data) => {
+      setLiveBackendStatus(data);
+      if (data) {
+        // Deteksi perubahan last_seen di browser
+        if (data.last_seen !== lastBackendSeenRef.current) {
+          lastBackendSeenRef.current = data.last_seen;
+          lastBackendChangeTimeRef.current = Date.now();
+        }
+      }
+    });
+
+    // d. Perintah (/commands limitToLast 50)
+    const unsubCmds = subscribeToCommands((cmds) => {
+      setLiveCommands(cmds);
+    });
+
+    // e. Respons (/responses limitToLast 50)
+    const unsubRes = subscribeToResponses((resps) => {
+      setLiveResponses(resps);
+    });
+
+    return () => {
+      unsubConn();
+      unsubEsp32();
+      unsubBackend();
+      unsubCmds();
+      unsubRes();
+    };
+  }, []);
+
+  // 2. Interval 1 Detik untuk Hitung Mundur Lokal & Umur Data
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const now = Date.now();
+
+      // Hitung mundur lokal dikurangi tiap detik dari waktu terima
+      if (rawRemainingSecondsRef.current != null && esp32ReceivedAtRef.current) {
+        const elapsedSec = Math.floor((now - esp32ReceivedAtRef.current) / 1000);
+        setLocalCountdown(Math.max(0, rawRemainingSecondsRef.current - elapsedSec));
+      } else {
+        setLocalCountdown(null);
+      }
+
+      // Umur data ESP32 (diukur dari kapan browser terakhir menerima updated_at yang berubah)
+      if (lastEsp32ChangeTimeRef.current) {
+        const age = Math.floor((now - lastEsp32ChangeTimeRef.current) / 1000);
+        setEsp32Age(age);
+      } else {
+        setEsp32Age(0);
+      }
+
+      // Umur data Backend (diukur dari kapan browser terakhir menerima last_seen yang berubah)
+      if (lastBackendChangeTimeRef.current) {
+        const age = Math.floor((now - lastBackendChangeTimeRef.current) / 1000);
+        setBackendAge(age);
+      } else {
+        setBackendAge(0);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // 3. Log Tersusun untuk Mode Terhubung (/commands dan /responses)
+  const connectedLogs = useMemo(() => {
+    return buildConnectedLogList(liveCommands, liveResponses);
+  }, [liveCommands, liveResponses]);
+
+  // 4. Loop Timer Simulasi FSM Lokal (Mode Simulasi)
   useEffect(() => {
     if (mode !== 'simulasi' || isPaused) return;
 
@@ -101,7 +219,6 @@ export default function App() {
         const deltaSeconds = (intervalMs / 1000) * simSpeed;
         const nextState = tickFSM(prevState, deltaSeconds);
 
-        // Catat perubahan state ke log
         if (nextState.stateCode !== prevStateCodeRef.current) {
           prevStateCodeRef.current = nextState.stateCode;
           addLog(
@@ -110,7 +227,6 @@ export default function App() {
           );
         }
 
-        // Cek jika simulasi prioritas ambulans selesai (DONE)
         if (
           prevState.simulationPriority &&
           prevState.simulationPriority.active &&
@@ -137,7 +253,7 @@ export default function App() {
 
   // Handler Panggil Ambulans (Hanya di mode Simulasi)
   const handleCallAmbulance = useCallback((direction) => {
-    if (activeAmbulance) return; // Satu permintaan ambulans dalam satu waktu
+    if (activeAmbulance || mode !== 'simulasi') return;
 
     const dirInfo = DIRECTION_TO_PHASE[direction];
     if (!dirInfo) return;
@@ -149,8 +265,6 @@ export default function App() {
       targetPhase: dirInfo.targetPhase,
     });
 
-    // Jalur data prioritas simulasi (PRD 10)
-    // 1. Deteksi (0.6 s)
     const t1 = setTimeout(() => {
       setPipelineStep(1);
       addLog(
@@ -159,7 +273,6 @@ export default function App() {
       );
     }, (SIMULATION_PARAMS.latencies.detection * 1000) / simSpeed);
 
-    // 2. Tulis Firebase (0.9 s)
     const t2 = setTimeout(() => {
       setPipelineStep(2);
       addLog(
@@ -168,7 +281,6 @@ export default function App() {
       );
     }, (SIMULATION_PARAMS.latencies.firebaseWrite * 1000) / simSpeed);
 
-    // 3. Validasi backend (1.3 s)
     const t3 = setTimeout(() => {
       setPipelineStep(3);
       addLog(
@@ -177,7 +289,6 @@ export default function App() {
       );
     }, (SIMULATION_PARAMS.latencies.backendValidate * 1000) / simSpeed);
 
-    // 4. Kirim Serial (1.6 s)
     const t4 = setTimeout(() => {
       setPipelineStep(4);
       addLog(
@@ -186,7 +297,6 @@ export default function App() {
       );
     }, (SIMULATION_PARAMS.latencies.serialSend * 1000) / simSpeed);
 
-    // 5. Terima ACK & Terapkan Prioritas FSM (1.7 s)
     const t5 = setTimeout(() => {
       setPipelineStep(5);
       addLog(
@@ -197,9 +307,8 @@ export default function App() {
     }, (SIMULATION_PARAMS.latencies.ackReceive * 1000) / simSpeed);
 
     ambulanceTimersRef.current = [t1, t2, t3, t4, t5];
-  }, [activeAmbulance, simSpeed, addLog]);
+  }, [activeAmbulance, mode, simSpeed, addLog]);
 
-  // Handler Ambulans Melintasi Persimpangan
   const handleAmbulancePassed = useCallback((reqId) => {
     addLog(
       'SYS',
@@ -208,7 +317,6 @@ export default function App() {
     setFsmState((prev) => notifyAmbulancePassed(prev));
   }, [addLog]);
 
-  // Handler Pembatalan Panggilan Ambulans
   const handleCancelAmbulance = useCallback(() => {
     ambulanceTimersRef.current.forEach(clearTimeout);
     ambulanceTimersRef.current = [];
@@ -225,7 +333,6 @@ export default function App() {
     setPipelineStep(0);
   }, [activeAmbulance, addLog]);
 
-  // Handler Reset Simulasi
   const handleResetSimulation = useCallback(() => {
     ambulanceTimersRef.current.forEach(clearTimeout);
     ambulanceTimersRef.current = [];
@@ -312,9 +419,11 @@ export default function App() {
           <div className="min-[881px]:col-span-7 flex flex-col gap-6">
             <IntersectionSim
               fsmState={fsmState}
+              mode={mode}
+              liveEsp32Status={liveEsp32Status}
               simSpeed={simSpeed}
               isPaused={isPaused}
-              activeAmbulance={activeAmbulance}
+              activeAmbulance={mode === 'simulasi' ? activeAmbulance : null}
               onCallAmbulance={handleCallAmbulance}
               onCancelAmbulance={handleCancelAmbulance}
               onAmbulancePassed={handleAmbulancePassed}
@@ -323,24 +432,42 @@ export default function App() {
               onReset={handleResetSimulation}
             />
             <MapView
-              ambulancePosition={getSimulatedGpsPosition(activeAmbulance)}
-              activeDirection={activeAmbulance?.direction}
+              ambulancePosition={mode === 'simulasi' ? getSimulatedGpsPosition(activeAmbulance) : null}
+              activeDirection={mode === 'simulasi' ? activeAmbulance?.direction : null}
             />
             <LogPanel
               logs={logs}
               mode={mode}
+              connectedLogs={connectedLogs}
               onClearLogs={() => setLogs([])}
             />
           </div>
 
           {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data) */}
           <div className="min-[881px]:col-span-5 flex flex-col gap-6">
-            <ConnectionBar mode={mode} />
-            <StatusCard fsmState={fsmState} mode={mode} />
-            <LampPanel fsmState={fsmState} />
+            <ConnectionBar
+              mode={mode}
+              firebaseConnected={firebaseConnected}
+              backendData={liveBackendStatus}
+              esp32Data={liveEsp32Status}
+              esp32Age={esp32Age}
+              backendAge={backendAge}
+            />
+            <StatusCard
+              fsmState={fsmState}
+              mode={mode}
+              liveEsp32Status={liveEsp32Status}
+              localCountdown={localCountdown}
+            />
+            <LampPanel
+              fsmState={fsmState}
+              mode={mode}
+              liveEsp32Status={liveEsp32Status}
+            />
             <PipelineBar
               activeStep={pipelineStep}
-              isPriorityActive={!!activeAmbulance}
+              isPriorityActive={mode === 'simulasi' && !!activeAmbulance}
+              mode={mode}
             />
           </div>
         </div>
