@@ -17,6 +17,7 @@ import {
 import {
   DIRECTION_TO_PHASE,
   SIMULATION_PARAMS,
+  MAP_CONFIG,
 } from './config/constants';
 
 function formatTimestamp() {
@@ -25,6 +26,25 @@ function formatTimestamp() {
   const s = String(d.getSeconds()).padStart(2, '0');
   return `${m}:${s}`;
 }
+
+const getSimulatedGpsPosition = (ambulance) => {
+  if (!ambulance) return null;
+  const baseLat = MAP_CONFIG.latitude;
+  const baseLng = MAP_CONFIG.longitude;
+  const offset = 0.0035; // ~380m
+  switch (ambulance.direction) {
+    case 'Utara':
+      return { lat: baseLat + offset, lng: baseLng, direction: 'Utara' };
+    case 'Selatan':
+      return { lat: baseLat - offset, lng: baseLng, direction: 'Selatan' };
+    case 'Timur':
+      return { lat: baseLat, lng: baseLng + offset, direction: 'Timur' };
+    case 'Barat':
+      return { lat: baseLat, lng: baseLng - offset, direction: 'Barat' };
+    default:
+      return null;
+  }
+};
 
 export default function App() {
   // Mode: 'simulasi' | 'terhubung'
@@ -302,7 +322,10 @@ export default function App() {
               onTogglePause={() => setIsPaused((p) => !p)}
               onReset={handleResetSimulation}
             />
-            <MapView />
+            <MapView
+              ambulancePosition={getSimulatedGpsPosition(activeAmbulance)}
+              activeDirection={activeAmbulance?.direction}
+            />
             <LogPanel
               logs={logs}
               mode={mode}
