@@ -3,16 +3,16 @@ import React from 'react';
 /**
  * PipelineBar
  * Menampilkan 5 tahap jalur data prioritas ambulans (simulasi).
- * Alur: Deteksi -> Firebase -> Backend -> Serial -> ESP32/LED -> Respons.
- * Catatan: Fitur prioritas ambulans hanya ada di mode simulasi dan diberi label jelas.
+ * Alur: Deteksi -> Firebase -> Backend -> Serial -> ESP32 -> Respons.
+ * Catatan: Fitur prioritas ambulans dan SET_PHASE/DONE hanya ada di mode Simulasi, berlabel "simulasi".
  */
-export default function PipelineBar() {
+export default function PipelineBar({ activeStep = 0, isPriorityActive = false }) {
   const stages = [
-    { id: 1, label: '1. Deteksi', desc: 'YOLOv8n / Pilihan Arah', active: true },
-    { id: 2, label: '2. Firebase', desc: '/commands', active: false },
-    { id: 3, label: '3. Backend', desc: 'Validasi & Serial', active: false },
-    { id: 4, label: '4. ESP32', desc: 'FSM & 9 GPIO LED', active: false },
-    { id: 5, label: '5. Respons', desc: 'ACK / DONE', active: false },
+    { id: 1, label: '1. Deteksi', desc: 'YOLOv8n / Pilihan Arah' },
+    { id: 2, label: '2. Firebase', desc: 'Tulis /commands' },
+    { id: 3, label: '3. Backend', desc: 'Validasi & Serial' },
+    { id: 4, label: '4. ESP32', desc: 'FSM & 9 GPIO LED' },
+    { id: 5, label: '5. Respons', desc: 'ACK & DONE' },
   ];
 
   return (
@@ -27,27 +27,34 @@ export default function PipelineBar() {
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        {stages.map((stage) => (
-          <div
-            key={stage.id}
-            className={`rounded-lg p-2.5 border text-center transition-all ${
-              stage.active
-                ? 'border-accent bg-accent/10 shadow-xs'
-                : 'border-border-line bg-surface-2 opacity-60'
-            }`}
-          >
+        {stages.map((stage) => {
+          const isActive = isPriorityActive && activeStep >= stage.id;
+          const isCurrent = isPriorityActive && activeStep === stage.id;
+
+          return (
             <div
-              className={`text-xs font-bold mb-0.5 ${
-                stage.active ? 'text-accent' : 'text-text-main'
+              key={stage.id}
+              className={`rounded-lg p-2.5 border text-center transition-all ${
+                isCurrent
+                  ? 'border-accent bg-accent/20 shadow-xs ring-1 ring-accent'
+                  : isActive
+                  ? 'border-accent/40 bg-accent/10'
+                  : 'border-border-line bg-surface-2 opacity-50'
               }`}
             >
-              {stage.label}
+              <div
+                className={`text-xs font-bold mb-0.5 ${
+                  isActive ? 'text-accent' : 'text-text-main'
+                }`}
+              >
+                {stage.label}
+              </div>
+              <div className="text-[10px] text-text-muted truncate">
+                {stage.desc}
+              </div>
             </div>
-            <div className="text-[10px] text-text-muted truncate">
-              {stage.desc}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

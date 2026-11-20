@@ -1,23 +1,43 @@
 import React from 'react';
+import { CYCLE_DURATION, PHASE_DURATION } from '../config/constants.js';
 
 /**
  * StatusCard
  * Menampilkan:
- * - Mode aktif (NORMAL / PRIORITAS AMBULANS)
- * - Fase aktif (FASE A, B, atau C)
+ * - Mode aktif (NORMAL atau PRIORITAS AMBULANS berlabel simulasi)
+ * - Fase aktif (FASE A - TLA, FASE B - TLB, FASE C - TLC, atau STARTUP)
  * - Kondisi lampu (HIJAU, KUNING, MERAH, MERAH + KUNING, SEMUA MERAH)
- * - Sisa waktu (hitung mundur)
+ * - Sisa waktu hitung mundur
  * - Bilah kemajuan siklus 66 detik (A: 22 s, B: 22 s, C: 22 s)
  */
-export default function StatusCard({ mode = 'simulasi' }) {
-  // Data placeholder untuk kerangka awal
+export default function StatusCard({ fsmState, mode = 'simulasi' }) {
+  if (!fsmState) return null;
+
   const isSim = mode === 'simulasi';
-  const isPriority = false; // Mode darurat ambulans
-  const currentPhase = 'FASE A - TLA (1,2)';
-  const currentCondition = 'HIJAU';
-  const remainingSeconds = 15;
-  const cycleTotal = 66; // 3 x 22 s
-  const currentElapsed = 7;
+  const isPriority = fsmState.mode === 'PRIORITAS AMBULANS';
+  const remainingSec = Math.ceil(fsmState.remainingSeconds || 0);
+
+  // Hitung progres dalam siklus 66 detik
+  const cycleElapsed = Math.min(
+    Math.max(Math.round(fsmState.cycleElapsed || 0), 0),
+    CYCLE_DURATION
+  );
+  const cyclePercent = ((cycleElapsed / CYCLE_DURATION) * 100).toFixed(1);
+
+  // Penentuan warna kondisi lampu
+  let conditionColorClass = 'text-tl-red';
+  let conditionDotClass = 'bg-tl-red shadow-tl-red/50';
+
+  if (fsmState.condition === 'HIJAU') {
+    conditionColorClass = 'text-tl-green';
+    conditionDotClass = 'bg-tl-green shadow-tl-green/50';
+  } else if (fsmState.condition === 'KUNING') {
+    conditionColorClass = 'text-tl-yellow';
+    conditionDotClass = 'bg-tl-yellow shadow-tl-yellow/50';
+  } else if (fsmState.condition === 'MERAH + KUNING') {
+    conditionColorClass = 'text-amber-500';
+    conditionDotClass = 'bg-amber-500 shadow-amber-500/50';
+  }
 
   return (
     <div className="rounded-xl border border-border-line bg-surface p-5 shadow-xs">
@@ -28,7 +48,7 @@ export default function StatusCard({ mode = 'simulasi' }) {
         {/* Lencana Mode */}
         {isPriority ? (
           <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-error text-white tracking-wide animate-pulse">
-            PRIORITAS AMBULANS
+            PRIORITAS AMBULANS (simulasi)
           </span>
         ) : (
           <span className="px-2.5 py-1 rounded-md text-xs font-bold bg-surface-2 text-success border border-success/30 tracking-wide">
@@ -43,11 +63,11 @@ export default function StatusCard({ mode = 'simulasi' }) {
           <div className="text-[11px] font-medium text-text-muted uppercase mb-1">
             Fase Aktif
           </div>
-          <div className="text-base font-bold text-text-main truncate">
-            {currentPhase}
+          <div className="text-base font-bold text-text-main truncate" title={fsmState.phase}>
+            {fsmState.phase || 'STARTUP'}
           </div>
-          <div className="text-[11px] text-text-muted mt-1">
-            Utara - Selatan (Lurus)
+          <div className="text-[11px] text-text-muted mt-1 font-mono">
+            State: {fsmState.stateCode}
           </div>
         </div>
 
@@ -57,13 +77,13 @@ export default function StatusCard({ mode = 'simulasi' }) {
             Kondisi Lampu
           </div>
           <div className="flex items-center gap-2">
-            <span className="w-3.5 h-3.5 rounded-full bg-tl-green shadow-xs shadow-tl-green/50" />
-            <span className="text-base font-bold text-tl-green">
-              {currentCondition}
+            <span className={`w-3.5 h-3.5 rounded-full shadow-xs ${conditionDotClass}`} />
+            <span className={`text-base font-bold ${conditionColorClass}`}>
+              {fsmState.condition || 'SEMUA MERAH'}
             </span>
           </div>
           <div className="text-[11px] text-text-muted mt-1">
-            Fase berjalan
+            {isPriority ? 'Prioritas ambulans ditahan' : 'Siklus otomatis 66 s'}
           </div>
         </div>
       </div>
@@ -74,10 +94,12 @@ export default function StatusCard({ mode = 'simulasi' }) {
           Sisa Waktu Fase
         </div>
         <div className="font-mono text-4xl font-extrabold text-accent">
-          {remainingSeconds} <span className="text-lg font-normal text-text-muted">detik</span>
+          {remainingSec} <span className="text-lg font-normal text-text-muted">detik</span>
         </div>
         <div className="text-[11px] text-text-muted mt-1">
-          {isSim ? 'Hitung mundur simulasi internal' : 'Koreksi lokal dari /esp32/status'}
+          {isSim
+            ? 'Mesin status internal (FSM murni 13 state)'
+            : 'Hitung mundur dikurangi lokal dari /esp32/status'}
         </div>
       </div>
 
@@ -85,20 +107,33 @@ export default function StatusCard({ mode = 'simulasi' }) {
       <div>
         <div className="flex justify-between items-center text-xs text-text-muted mb-2 font-medium">
           <span>Progres Siklus (66 s)</span>
-          <span className="font-mono text-text-main">{currentElapsed} s / {cycleTotal} s</span>
+          <span className="font-mono text-text-main">
+            {cycleElapsed} s / {CYCLE_DURATION} s ({cyclePercent}%)
+          </span>
         </div>
-        <div className="w-full bg-surface-2 rounded-full h-3 overflow-hidden flex p-0.5 border border-border-line">
-          {/* Fase A (22s) */}
-          <div className="h-full bg-accent rounded-l-full" style={{ width: '33.33%' }} title="Fase A (22 s)" />
-          {/* Fase B (22s) */}
-          <div className="h-full bg-surface border-x border-border-line" style={{ width: '33.33%' }} title="Fase B (22 s)" />
-          {/* Fase C (22s) */}
-          <div className="h-full bg-surface rounded-r-full" style={{ width: '33.33%' }} title="Fase C (22 s)" />
+        <div className="w-full bg-surface-2 rounded-full h-3 overflow-hidden flex p-0.5 border border-border-line relative">
+          {/* Garis penanda 3 fase (masing-masing 22 detik = 33.33%) */}
+          <div
+            className={`h-full transition-all duration-300 rounded-full ${
+              cycleElapsed < 22
+                ? 'bg-accent'
+                : cycleElapsed < 44
+                ? 'bg-emerald-500'
+                : 'bg-purple-500'
+            }`}
+            style={{ width: `${cyclePercent}%` }}
+          />
         </div>
         <div className="flex justify-between text-[10px] text-text-muted mt-1 font-mono">
-          <span className="text-accent font-semibold">Fase A (22s)</span>
-          <span>Fase B (22s)</span>
-          <span>Fase C (22s)</span>
+          <span className={cycleElapsed < 22 ? 'text-accent font-bold' : ''}>
+            Fase A (22 s)
+          </span>
+          <span className={cycleElapsed >= 22 && cycleElapsed < 44 ? 'text-emerald-500 font-bold' : ''}>
+            Fase B (22 s)
+          </span>
+          <span className={cycleElapsed >= 44 ? 'text-purple-500 font-bold' : ''}>
+            Fase C (22 s)
+          </span>
         </div>
       </div>
     </div>
