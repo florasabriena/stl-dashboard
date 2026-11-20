@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ConnectionBar from './components/ConnectionBar';
 import StatusCard from './components/StatusCard';
 import LampPanel from './components/LampPanel';
@@ -7,24 +7,215 @@ import IntersectionSim from './components/IntersectionSim';
 import MapView from './components/MapView';
 import LogPanel from './components/LogPanel';
 import Login from './components/Login';
+import {
+  createInitialFSMState,
+  tickFSM,
+  triggerEmergencyPriority,
+  notifyAmbulancePassed,
+  cancelEmergencyPriority,
+} from './lib/fsm';
+import {
+  DIRECTION_TO_PHASE,
+  SIMULATION_PARAMS,
+} from './config/constants';
 
-/**
- * Dashboard Smart Traffic Light Rawamangun
- * Kerangka Aplikasi Utama
- */
+function formatTimestamp() {
+  const d = new Date();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
 export default function App() {
-  // Saklar mode: 'simulasi' | 'terhubung'
+  // Mode: 'simulasi' | 'terhubung'
   const [mode, setMode] = useState('simulasi');
   const [showLogin, setShowLogin] = useState(false);
 
-  const isSim = mode === 'simulasi';
+  // Status FSM Simulasi
+  const [fsmState, setFsmState] = useState(() => createInitialFSMState());
+  const [simSpeed, setSimSpeed] = useState(1);
+  const [isPaused, setIsPaused] = useState(false);
 
-  const handleModeChange = (newMode) => {
-    setMode(newMode);
-    if (newMode === 'terhubung') {
-      // Optional: prompt login dialog untuk mode terhubung bila belum login
+  // Status Jalur Data & Ambulans
+  const [pipelineStep, setPipelineStep] = useState(0);
+  const [activeAmbulance, setActiveAmbulance] = useState(null);
+  const ambulanceTimersRef = useRef([]);
+
+  // Log sistem
+  const [logs, setLogs] = useState(() => [
+    {
+      time: formatTimestamp(),
+      type: 'SYS',
+      msg: 'Dashboard Smart Traffic Light Rawamangun dimulai.',
+      isSimulation: true,
+    },
+    {
+      time: formatTimestamp(),
+      type: 'FSM',
+      msg: 'Inisialisasi FSM normal: STARTUP_ALL_RED (3 s). Siklus normal 66 s.',
+      isSimulation: true,
+    },
+  ]);
+
+  const prevStateCodeRef = useRef(fsmState.stateCode);
+
+  const addLog = useCallback((type, msg, isSim = true) => {
+    setLogs((prev) => [
+      {
+        time: formatTimestamp(),
+        type,
+        msg,
+        isSimulation: isSim,
+      },
+      ...prev.slice(0, 99), // Simpan 100 log terakhir
+    ]);
+  }, []);
+
+  // Loop Timer Simulasi FSM (60 FPS atau interval 100ms)
+  useEffect(() => {
+    if (mode !== 'simulasi' || isPaused) return;
+
+    const intervalMs = 100;
+    const timer = setInterval(() => {
+      setFsmState((prevState) => {
+        const deltaSeconds = (intervalMs / 1000) * simSpeed;
+        const nextState = tickFSM(prevState, deltaSeconds);
+
+        // Catat perubahan state ke log
+        if (nextState.stateCode !== prevStateCodeRef.current) {
+          prevStateCodeRef.current = nextState.stateCode;
+          addLog(
+            'FSM',
+            `Transisi state -> ${nextState.stateCode} (${nextState.remainingSeconds} s). ${nextState.phase} [${nextState.condition}]`
+          );
+        }
+
+        // Cek jika simulasi prioritas ambulans selesai (DONE)
+        if (
+          prevState.simulationPriority &&
+          prevState.simulationPriority.active &&
+          nextState.simulationPriority &&
+          !nextState.simulationPriority.active &&
+          nextState.simulationPriority.stage === 'DONE' &&
+          !nextState.simulationPriority.doneEmitted
+        ) {
+          nextState.simulationPriority.doneEmitted = true;
+          addLog(
+            'DONE',
+            `[SIMULASI] Prioritas selesai. USB-Serial: {"type":"DONE","id":"${nextState.simulationPriority.requestId}"}`
+          );
+          setPipelineStep(0);
+          setActiveAmbulance(null);
+        }
+
+        return nextState;
+      });
+    }, intervalMs);
+
+    return () => clearInterval(timer);
+  }, [mode, isPaused, simSpeed, addLog]);
+
+  // Handler Panggil Ambulans (Hanya di mode Simulasi)
+  const handleCallAmbulance = useCallback((direction) => {
+    if (activeAmbulance) return; // Satu permintaan ambulans dalam satu waktu
+
+    const dirInfo = DIRECTION_TO_PHASE[direction];
+    if (!dirInfo) return;
+
+    const reqId = `req-${Date.now().toString(36)}`;
+    setActiveAmbulance({
+      direction,
+      requestId: reqId,
+      targetPhase: dirInfo.targetPhase,
+    });
+
+    // Jalur data prioritas simulasi (PRD 10)
+    // 1. Deteksi (0.6 s)
+    const t1 = setTimeout(() => {
+      setPipelineStep(1);
+      addLog(
+        'SYS',
+        `[SIMULASI] YOLOv8n mendeteksi ambulans dari arah ${direction} (request_id=${reqId})`
+      );
+    }, (SIMULATION_PARAMS.latencies.detection * 1000) / simSpeed);
+
+    // 2. Tulis Firebase (0.9 s)
+    const t2 = setTimeout(() => {
+      setPipelineStep(2);
+      addLog(
+        'SYS',
+        `[SIMULASI] Menulis permintaan prioritas ke Firebase: /commands/${reqId}`
+      );
+    }, (SIMULATION_PARAMS.latencies.firebaseWrite * 1000) / simSpeed);
+
+    // 3. Validasi backend (1.3 s)
+    const t3 = setTimeout(() => {
+      setPipelineStep(3);
+      addLog(
+        'SYS',
+        `[SIMULASI] Python Backend memvalidasi: Arah ${direction} -> Fase ${dirInfo.targetPhase} (Grup ${dirInfo.targetGroup})`
+      );
+    }, (SIMULATION_PARAMS.latencies.backendValidate * 1000) / simSpeed);
+
+    // 4. Kirim Serial (1.6 s)
+    const t4 = setTimeout(() => {
+      setPipelineStep(4);
+      addLog(
+        'SET_PHASE',
+        `[SIMULASI] USB-Serial: {"cmd":"SET_PHASE","phase":"${dirInfo.targetPhase}","id":"${reqId}"}`
+      );
+    }, (SIMULATION_PARAMS.latencies.serialSend * 1000) / simSpeed);
+
+    // 5. Terima ACK & Terapkan Prioritas FSM (1.7 s)
+    const t5 = setTimeout(() => {
+      setPipelineStep(5);
+      addLog(
+        'ACK',
+        `[SIMULASI] ESP32 ACK: {"type":"ACK","id":"${reqId}","cmd":"SET_PHASE","message":"PRIORITY_SET"}`
+      );
+      setFsmState((prev) => triggerEmergencyPriority(prev, direction, reqId));
+    }, (SIMULATION_PARAMS.latencies.ackReceive * 1000) / simSpeed);
+
+    ambulanceTimersRef.current = [t1, t2, t3, t4, t5];
+  }, [activeAmbulance, simSpeed, addLog]);
+
+  // Handler Ambulans Melintasi Persimpangan
+  const handleAmbulancePassed = useCallback((reqId) => {
+    addLog(
+      'SYS',
+      `[SIMULASI] Ambulans telah melewati pusat persimpangan. Menahan hijau 2 s lalu rilis.`
+    );
+    setFsmState((prev) => notifyAmbulancePassed(prev));
+  }, [addLog]);
+
+  // Handler Pembatalan Panggilan Ambulans
+  const handleCancelAmbulance = useCallback(() => {
+    ambulanceTimersRef.current.forEach(clearTimeout);
+    ambulanceTimersRef.current = [];
+
+    if (activeAmbulance) {
+      addLog(
+        'SYS',
+        `[SIMULASI] Permintaan prioritas ambulans dibatalkan (request_id=${activeAmbulance.requestId})`
+      );
     }
-  };
+
+    setFsmState((prev) => cancelEmergencyPriority(prev));
+    setActiveAmbulance(null);
+    setPipelineStep(0);
+  }, [activeAmbulance, addLog]);
+
+  // Handler Reset Simulasi
+  const handleResetSimulation = useCallback(() => {
+    ambulanceTimersRef.current.forEach(clearTimeout);
+    ambulanceTimersRef.current = [];
+    setActiveAmbulance(null);
+    setPipelineStep(0);
+    const initial = createInitialFSMState();
+    prevStateCodeRef.current = initial.stateCode;
+    setFsmState(initial);
+    addLog('SYS', '[SIMULASI] Simulasi di-reset ke STARTUP_ALL_RED (3 s).');
+  }, [addLog]);
 
   return (
     <div className="min-h-screen bg-app-bg text-text-main transition-colors">
@@ -41,10 +232,9 @@ export default function App() {
             </span>
           </div>
 
-          {/* Saklar Mode & Penanda Mode */}
+          {/* Saklar Mode & Penanda Mode Jelas */}
           <div className="flex items-center gap-3">
-            {/* Lencana Penanda Mode Jelas */}
-            {isSim ? (
+            {mode === 'simulasi' ? (
               <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-accent/15 text-accent border border-accent/30 tracking-wide">
                 MODE SIMULASI
               </span>
@@ -59,9 +249,9 @@ export default function App() {
             <div className="flex p-0.5 rounded-lg bg-surface-2 border border-border-line text-xs">
               <button
                 type="button"
-                onClick={() => handleModeChange('simulasi')}
+                onClick={() => setMode('simulasi')}
                 className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
-                  isSim
+                  mode === 'simulasi'
                     ? 'bg-accent text-surface shadow-xs'
                     : 'text-text-muted hover:text-text-main'
                 }`}
@@ -70,9 +260,9 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => handleModeChange('terhubung')}
+                onClick={() => setMode('terhubung')}
                 className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
-                  !isSim
+                  mode === 'terhubung'
                     ? 'bg-accent text-surface shadow-xs'
                     : 'text-text-muted hover:text-text-main'
                 }`}
@@ -82,7 +272,7 @@ export default function App() {
             </div>
 
             {/* Tombol Auth untuk mode terhubung */}
-            {!isSim && (
+            {mode === 'terhubung' && (
               <button
                 type="button"
                 onClick={() => setShowLogin(true)}
@@ -100,66 +290,40 @@ export default function App() {
         <div className="grid grid-cols-1 min-[881px]:grid-cols-12 gap-6 items-start">
           {/* KOLOM KIRI (Fokus Utama: Canvas Persimpangan, MapView, Log) */}
           <div className="min-[881px]:col-span-7 flex flex-col gap-6">
-            <IntersectionSim />
+            <IntersectionSim
+              fsmState={fsmState}
+              simSpeed={simSpeed}
+              isPaused={isPaused}
+              activeAmbulance={activeAmbulance}
+              onCallAmbulance={handleCallAmbulance}
+              onCancelAmbulance={handleCancelAmbulance}
+              onAmbulancePassed={handleAmbulancePassed}
+              onSpeedChange={(spd) => setSimSpeed(spd)}
+              onTogglePause={() => setIsPaused((p) => !p)}
+              onReset={handleResetSimulation}
+            />
             <MapView />
-            <LogPanel mode={mode} />
+            <LogPanel
+              logs={logs}
+              mode={mode}
+              onClearLogs={() => setLogs([])}
+            />
           </div>
 
-          {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data, Kontrol) */}
+          {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data) */}
           <div className="min-[881px]:col-span-5 flex flex-col gap-6">
             <ConnectionBar mode={mode} />
-            <StatusCard mode={mode} />
-            <LampPanel />
-            <PipelineBar />
-
-            {/* Kontrol Panggilan Ambulans Placeholder (Hanya Mode Simulasi) */}
-            {isSim && (
-              <div className="rounded-xl border border-border-line bg-surface p-5 shadow-xs">
-                <div className="flex items-center justify-between mb-3 border-b border-border-line pb-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-text-muted">
-                    Panggil Ambulans (Simulasi)
-                  </h3>
-                  <span className="text-[10px] text-text-muted">Pilih arah kedatangan</span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs font-medium">
-                  <button
-                    type="button"
-                    className="p-2.5 rounded-lg border border-border-line bg-surface-2 hover:border-accent hover:text-accent transition-colors text-center"
-                  >
-                    Utara (TL2 → Fase A)
-                  </button>
-                  <button
-                    type="button"
-                    className="p-2.5 rounded-lg border border-border-line bg-surface-2 hover:border-accent hover:text-accent transition-colors text-center"
-                  >
-                    Selatan (TL1 → Fase A)
-                  </button>
-                  <button
-                    type="button"
-                    className="p-2.5 rounded-lg border border-border-line bg-surface-2 hover:border-accent hover:text-accent transition-colors text-center"
-                  >
-                    Timur (TL3 → Fase C)
-                  </button>
-                  <button
-                    type="button"
-                    className="p-2.5 rounded-lg border border-border-line bg-surface-2 hover:border-accent hover:text-accent transition-colors text-center"
-                  >
-                    Barat (TL4 → Fase C)
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="w-full mt-3 p-2 rounded-lg border border-error/40 text-error bg-error/5 hover:bg-error/10 text-xs font-semibold transition-colors"
-                >
-                  Batalkan Panggilan
-                </button>
-              </div>
-            )}
+            <StatusCard fsmState={fsmState} mode={mode} />
+            <LampPanel fsmState={fsmState} />
+            <PipelineBar
+              activeStep={pipelineStep}
+              isPriorityActive={!!activeAmbulance}
+            />
           </div>
         </div>
       </main>
 
-      {/* Modal Login */}
+      {/* Modal Login Firebase */}
       <Login isOpen={showLogin} onClose={() => setShowLogin(false)} />
     </div>
   );
