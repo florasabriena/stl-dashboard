@@ -25,6 +25,8 @@ import {
   cancelEmergencyPriority,
 } from '../src/lib/fsm.js';
 
+import { getFirebaseAuthErrorMessage } from '../src/lib/authErrors.js';
+
 describe('Smart Traffic Light Rawamangun - FSM & Konfigurasi 13 State', () => {
   it('harus memiliki tepat 13 state dengan nama yang persis dari docs/firebase-schema.md bagian 3', () => {
     assert.equal(FSM_STATES.length, 13, 'Jumlah state harus tepat 13');
@@ -225,6 +227,16 @@ describe('Smart Traffic Light Rawamangun - FSM & Konfigurasi 13 State', () => {
     const cancelledState = cancelEmergencyPriority(priorityState);
     assert.equal(cancelledState.mode, 'NORMAL');
     assert.equal(cancelledState.simulationPriority.active, false);
+  });
+
+  it('pesan kesalahan Firebase Authentication harus diterjemahkan ke bahasa Indonesia dengan benar', () => {
+    assert.equal(getFirebaseAuthErrorMessage('auth/invalid-email'), 'Format email tidak valid.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/wrong-password'), 'Kata sandi yang Anda masukkan salah.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/user-not-found'), 'Akun dengan email ini tidak ditemukan.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/invalid-credential'), 'Email atau kata sandi tidak sesuai.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/too-many-requests'), 'Terlalu banyak percobaan gagal. Silakan coba beberapa saat lagi.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/network-request-failed'), 'Gagal terhubung ke jaringan. Periksa koneksi internet Anda.');
+    assert.equal(getFirebaseAuthErrorMessage('auth/unknown-error'), 'Gagal masuk. Silakan periksa kembali email dan kata sandi Anda.');
   });
 });
 

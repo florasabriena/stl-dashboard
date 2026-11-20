@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth } from './lib/firebase';
 import ConnectionBar from './components/ConnectionBar';
 import StatusCard from './components/StatusCard';
 import LampPanel from './components/LampPanel';
@@ -58,6 +60,7 @@ export default function App() {
   // Mode: 'simulasi' | 'terhubung'
   const [mode, setMode] = useState('simulasi');
   const [showLogin, setShowLogin] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
 
   // Status FSM Simulasi
   const [fsmState, setFsmState] = useState(() => createInitialFSMState());
@@ -119,18 +122,50 @@ export default function App() {
     ]);
   }, []);
 
-  // 1. Pasang Listener HANYA-BACA ke Firebase RTDB
+  // 1. Pantau Status Autentikasi Firebase
   useEffect(() => {
-    // a. Status koneksi socket Firebase (.info/connected)
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      if (user) {
+        addLog('SYS', `[AUTH] Berhasil masuk sebagai: ${user.email}`, false);
+      }
+    });
+    return () => unsubAuth();
+  }, [addLog]);
+
+  // Handler ganti mode (Mode Terhubung wajib login)
+  const handleModeChange = (newMode) => {
+    if (newMode === 'terhubung' && !currentUser) {
+      setShowLogin(true);
+      return;
+    }
+    setMode(newMode);
+  };
+
+  // Handler keluar (Sign Out)
+  const handleLogout = async () => {
+    try {
+      const email = currentUser?.email;
+      await signOut(auth);
+      addLog('SYS', `[AUTH] Pengguna ${email || ''} telah keluar.`, false);
+      // Kembali ke mode simulasi jika sedang di mode terhubung
+      if (mode === 'terhubung') {
+        setMode('simulasi');
+      }
+    } catch (err) {
+      console.error('Logout error:', err);
+    }
+  };
+
+  // 2. Pasang Listener HANYA-BACA ke Firebase RTDB
+  useEffect(() => {
     const unsubConn = subscribeToFirebaseConnection((conn) => {
       setFirebaseConnected(conn);
     });
 
-    // b. Status ESP32 (/esp32/status)
     const unsubEsp32 = subscribeToEsp32Status((data) => {
       setLiveEsp32Status(data);
       if (data) {
-        // Deteksi perubahan updated_at di browser
         if (data.updated_at !== lastEsp32UpdatedAtRef.current) {
           lastEsp32UpdatedAtRef.current = data.updated_at;
           lastEsp32ChangeTimeRef.current = Date.now();
@@ -140,11 +175,9 @@ export default function App() {
       }
     });
 
-    // c. Status Backend (/backend/status)
     const unsubBackend = subscribeToBackendStatus((data) => {
       setLiveBackendStatus(data);
       if (data) {
-        // Deteksi perubahan last_seen di browser
         if (data.last_seen !== lastBackendSeenRef.current) {
           lastBackendSeenRef.current = data.last_seen;
           lastBackendChangeTimeRef.current = Date.now();
@@ -152,12 +185,10 @@ export default function App() {
       }
     });
 
-    // d. Perintah (/commands limitToLast 50)
     const unsubCmds = subscribeToCommands((cmds) => {
       setLiveCommands(cmds);
     });
 
-    // e. Respons (/responses limitToLast 50)
     const unsubRes = subscribeToResponses((resps) => {
       setLiveResponses(resps);
     });
@@ -171,12 +202,11 @@ export default function App() {
     };
   }, []);
 
-  // 2. Interval 1 Detik untuk Hitung Mundur Lokal & Umur Data
+  // 3. Interval 1 Detik untuk Hitung Mundur Lokal & Umur Data
   useEffect(() => {
     const timer = setInterval(() => {
       const now = Date.now();
 
-      // Hitung mundur lokal dikurangi tiap detik dari waktu terima
       if (rawRemainingSecondsRef.current != null && esp32ReceivedAtRef.current) {
         const elapsedSec = Math.floor((now - esp32ReceivedAtRef.current) / 1000);
         setLocalCountdown(Math.max(0, rawRemainingSecondsRef.current - elapsedSec));
@@ -184,7 +214,6 @@ export default function App() {
         setLocalCountdown(null);
       }
 
-      // Umur data ESP32 (diukur dari kapan browser terakhir menerima updated_at yang berubah)
       if (lastEsp32ChangeTimeRef.current) {
         const age = Math.floor((now - lastEsp32ChangeTimeRef.current) / 1000);
         setEsp32Age(age);
@@ -192,7 +221,6 @@ export default function App() {
         setEsp32Age(0);
       }
 
-      // Umur data Backend (diukur dari kapan browser terakhir menerima last_seen yang berubah)
       if (lastBackendChangeTimeRef.current) {
         const age = Math.floor((now - lastBackendChangeTimeRef.current) / 1000);
         setBackendAge(age);
@@ -204,12 +232,12 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // 3. Log Tersusun untuk Mode Terhubung (/commands dan /responses)
+  // 4. Log Tersusun untuk Mode Terhubung (/commands dan /responses)
   const connectedLogs = useMemo(() => {
     return buildConnectedLogList(liveCommands, liveResponses);
   }, [liveCommands, liveResponses]);
 
-  // 4. Loop Timer Simulasi FSM Lokal (Mode Simulasi)
+  // 5. Loop Timer Simulasi FSM Lokal (Mode Simulasi)
   useEffect(() => {
     if (mode !== 'simulasi' || isPaused) return;
 
@@ -359,7 +387,7 @@ export default function App() {
             </span>
           </div>
 
-          {/* Saklar Mode & Penanda Mode Jelas */}
+          {/* Saklar Mode, Penanda Mode, dan Tombol Akun */}
           <div className="flex items-center gap-3">
             {mode === 'simulasi' ? (
               <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-accent/15 text-accent border border-accent/30 tracking-wide">
@@ -376,8 +404,8 @@ export default function App() {
             <div className="flex p-0.5 rounded-lg bg-surface-2 border border-border-line text-xs">
               <button
                 type="button"
-                onClick={() => setMode('simulasi')}
-                className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
+                onClick={() => handleModeChange('simulasi')}
+                className={`px-3 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
                   mode === 'simulasi'
                     ? 'bg-accent text-surface shadow-xs'
                     : 'text-text-muted hover:text-text-main'
@@ -387,8 +415,8 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setMode('terhubung')}
-                className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
+                onClick={() => handleModeChange('terhubung')}
+                className={`px-3 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
                   mode === 'terhubung'
                     ? 'bg-accent text-surface shadow-xs'
                     : 'text-text-muted hover:text-text-main'
@@ -398,12 +426,28 @@ export default function App() {
               </button>
             </div>
 
-            {/* Tombol Auth untuk mode terhubung */}
-            {mode === 'terhubung' && (
+            {/* Tombol Profil / Keluar / Login */}
+            {currentUser ? (
+              <div className="flex items-center gap-2 pl-1 border-l border-border-line">
+                <span
+                  className="text-xs text-text-muted px-2 py-1 rounded-md bg-surface-2 border border-border-line max-w-[150px] truncate"
+                  title={currentUser.email}
+                >
+                  👤 {currentUser.email}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="text-xs font-bold px-2.5 py-1.5 rounded-lg border border-border-line bg-surface-2 hover:bg-error/15 hover:text-error hover:border-error/40 text-text-muted transition-colors cursor-pointer"
+                >
+                  Keluar
+                </button>
+              </div>
+            ) : (
               <button
                 type="button"
                 onClick={() => setShowLogin(true)}
-                className="text-xs font-medium px-2.5 py-1.5 rounded-lg border border-border-line bg-surface-2 hover:bg-surface-2/80 text-text-muted hover:text-text-main transition-colors"
+                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-border-line bg-surface-2 hover:bg-surface-2/80 text-text-muted hover:text-text-main transition-colors cursor-pointer"
               >
                 Login
               </button>
@@ -412,69 +456,112 @@ export default function App() {
         </div>
       </header>
 
-      {/* KONTEN UTAMA DUA KOLOM (SATU KOLOM DI HP) */}
+      {/* KONTEN UTAMA */}
       <main className="max-w-7xl mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 min-[881px]:grid-cols-12 gap-6 items-start">
-          {/* KOLOM KIRI (Fokus Utama: Canvas Persimpangan, MapView, Log) */}
-          <div className="min-[881px]:col-span-7 flex flex-col gap-6">
-            <IntersectionSim
-              fsmState={fsmState}
-              mode={mode}
-              liveEsp32Status={liveEsp32Status}
-              simSpeed={simSpeed}
-              isPaused={isPaused}
-              activeAmbulance={mode === 'simulasi' ? activeAmbulance : null}
-              onCallAmbulance={handleCallAmbulance}
-              onCancelAmbulance={handleCancelAmbulance}
-              onAmbulancePassed={handleAmbulancePassed}
-              onSpeedChange={(spd) => setSimSpeed(spd)}
-              onTogglePause={() => setIsPaused((p) => !p)}
-              onReset={handleResetSimulation}
-            />
-            <MapView
-              ambulancePosition={mode === 'simulasi' ? getSimulatedGpsPosition(activeAmbulance) : null}
-              activeDirection={mode === 'simulasi' ? activeAmbulance?.direction : null}
-            />
-            <LogPanel
-              logs={logs}
-              mode={mode}
-              connectedLogs={connectedLogs}
-              onClearLogs={() => setLogs([])}
-            />
+        {/* Gate Perlindungan: Mode Terhubung hanya bisa dibuka setelah Login */}
+        {mode === 'terhubung' && !currentUser ? (
+          <div className="max-w-md mx-auto my-12 p-8 rounded-xl border border-border-line bg-surface text-center shadow-xl">
+            <div className="w-14 h-14 rounded-full bg-accent/15 text-accent flex items-center justify-center mx-auto mb-3 text-2xl border border-accent/30">
+              🔒
+            </div>
+            <h2 className="text-base font-bold text-text-main mb-1.5">
+              Akses Mode Terhubung Dibatasi
+            </h2>
+            <p className="text-xs text-text-muted mb-6 leading-relaxed">
+              Mode Terhubung hanya bisa dibuka setelah login dengan akun Firebase resmi. Mode Simulasi tetap terbuka tanpa login.
+            </p>
+            <div className="flex flex-col sm:flex-row justify-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowLogin(true)}
+                className="px-4 py-2.5 rounded-lg bg-accent text-surface text-xs font-bold hover:bg-accent-hover transition-colors shadow-xs cursor-pointer"
+              >
+                Masuk Sekarang
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('simulasi')}
+                className="px-4 py-2.5 rounded-lg bg-surface-2 text-text-muted hover:text-text-main text-xs font-semibold transition-colors border border-border-line cursor-pointer"
+              >
+                Tetap di Mode Simulasi
+              </button>
+            </div>
           </div>
+        ) : (
+          /* TATA LETAK DUA KOLOM (SATU KOLOM DI HP) */
+          <div className="grid grid-cols-1 min-[881px]:grid-cols-12 gap-6 items-start">
+            {/* KOLOM KIRI (Canvas Persimpangan, MapView, Log) */}
+            <div className="min-[881px]:col-span-7 flex flex-col gap-6">
+              <IntersectionSim
+                fsmState={fsmState}
+                mode={mode}
+                liveEsp32Status={liveEsp32Status}
+                simSpeed={simSpeed}
+                isPaused={isPaused}
+                activeAmbulance={mode === 'simulasi' ? activeAmbulance : null}
+                onCallAmbulance={handleCallAmbulance}
+                onCancelAmbulance={handleCancelAmbulance}
+                onAmbulancePassed={handleAmbulancePassed}
+                onSpeedChange={(spd) => setSimSpeed(spd)}
+                onTogglePause={() => setIsPaused((p) => !p)}
+                onReset={handleResetSimulation}
+              />
+              <MapView
+                ambulancePosition={mode === 'simulasi' ? getSimulatedGpsPosition(activeAmbulance) : null}
+                activeDirection={mode === 'simulasi' ? activeAmbulance?.direction : null}
+              />
+              <LogPanel
+                logs={logs}
+                mode={mode}
+                connectedLogs={connectedLogs}
+                onClearLogs={() => setLogs([])}
+              />
+            </div>
 
-          {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data) */}
-          <div className="min-[881px]:col-span-5 flex flex-col gap-6">
-            <ConnectionBar
-              mode={mode}
-              firebaseConnected={firebaseConnected}
-              backendData={liveBackendStatus}
-              esp32Data={liveEsp32Status}
-              esp32Age={esp32Age}
-              backendAge={backendAge}
-            />
-            <StatusCard
-              fsmState={fsmState}
-              mode={mode}
-              liveEsp32Status={liveEsp32Status}
-              localCountdown={localCountdown}
-            />
-            <LampPanel
-              fsmState={fsmState}
-              mode={mode}
-              liveEsp32Status={liveEsp32Status}
-            />
-            <PipelineBar
-              activeStep={pipelineStep}
-              isPriorityActive={mode === 'simulasi' && !!activeAmbulance}
-              mode={mode}
-            />
+            {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data) */}
+            <div className="min-[881px]:col-span-5 flex flex-col gap-6">
+              <ConnectionBar
+                mode={mode}
+                firebaseConnected={firebaseConnected}
+                backendData={liveBackendStatus}
+                esp32Data={liveEsp32Status}
+                esp32Age={esp32Age}
+                backendAge={backendAge}
+              />
+              <StatusCard
+                fsmState={fsmState}
+                mode={mode}
+                liveEsp32Status={liveEsp32Status}
+                localCountdown={localCountdown}
+              />
+              <LampPanel
+                fsmState={fsmState}
+                mode={mode}
+                liveEsp32Status={liveEsp32Status}
+              />
+              <PipelineBar
+                activeStep={pipelineStep}
+                isPriorityActive={mode === 'simulasi' && !!activeAmbulance}
+                mode={mode}
+              />
+            </div>
           </div>
-        </div>
+        )}
       </main>
 
       {/* Modal Login Firebase */}
-      <Login isOpen={showLogin} onClose={() => setShowLogin(false)} />
+      <Login
+        isOpen={showLogin}
+        onClose={() => setShowLogin(false)}
+        onSuccess={() => {
+          setShowLogin(false);
+          setMode('terhubung');
+        }}
+        onSwitchToSimulation={() => {
+          setShowLogin(false);
+          setMode('simulasi');
+        }}
+      />
     </div>
   );
 }
