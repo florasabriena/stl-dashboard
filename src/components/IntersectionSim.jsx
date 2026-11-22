@@ -145,8 +145,8 @@ export default function IntersectionSim({
       mode === 'terhubung'
         ? liveEsp32Status?.state || 'UNKNOWN'
         : fsmState
-        ? fsmState.stateCode
-        : 'STARTUP_ALL_RED';
+          ? fsmState.stateCode
+          : 'STARTUP_ALL_RED';
     const lampColors = getLampColors(currentStateCode);
     const spawnRate = SIMULATION_PARAMS.spawnRates[trafficScenario] || 0.07;
 
@@ -194,15 +194,68 @@ export default function IntersectionSim({
 
     // Update kendaraan umum
     const updatedVehicles = [];
+    const TURN_RADIUS = 42;
+    const TURN_RATE = SIMULATION_PARAMS.vehicleSpeed / TURN_RADIUS; // rad/s
+
     for (const v of vehiclesRef.current) {
       const canMove = checkCanMove(v, lampColors, false);
       if (canMove) {
-        // Gerakan belok atau lurus
-        if (v.isTurningRight && v.inIntersection) {
-          v.angle += v.turnSpeed * dt;
-          v.x += Math.cos(v.angle) * v.speed * dt;
-          v.y += Math.sin(v.angle) * v.speed * dt;
+        if (v.isTurningRight) {
+          if (v.turnState === 'approaching') {
+            if (v.laneId === 'N2') {
+              const dist = v.speed * dt;
+              v.y += dist;
+              if (v.y >= 268) {
+                const excess = v.y - 268;
+                v.turnState = 'turning';
+                v.turnProgress = excess / TURN_RADIUS;
+                v.angle = Math.PI / 2 + v.turnProgress;
+                v.x = 226 + TURN_RADIUS * Math.cos(v.turnProgress);
+                v.y = 268 + TURN_RADIUS * Math.sin(v.turnProgress);
+              }
+            } else if (v.laneId === 'S2') {
+              const dist = v.speed * dt;
+              v.y -= dist;
+              if (v.y <= 432) {
+                const excess = 432 - v.y;
+                v.turnState = 'turning';
+                v.turnProgress = excess / TURN_RADIUS;
+                v.angle = -Math.PI / 2 + v.turnProgress;
+                v.x = 474 - TURN_RADIUS * Math.cos(v.turnProgress);
+                v.y = 432 - TURN_RADIUS * Math.sin(v.turnProgress);
+              }
+            }
+          } else if (v.turnState === 'turning') {
+            v.turnProgress += TURN_RATE * dt;
+            if (v.turnProgress >= Math.PI / 2) {
+              const excessAngle = v.turnProgress - Math.PI / 2;
+              const excessDist = excessAngle * TURN_RADIUS;
+              v.turnProgress = Math.PI / 2;
+              v.turnState = 'completed';
+              v.isTurningRight = false;
+              if (v.laneId === 'N2') {
+                v.y = 310;
+                v.angle = Math.PI;
+                v.x = 226 - excessDist;
+              } else if (v.laneId === 'S2') {
+                v.y = 390;
+                v.angle = 0;
+                v.x = 474 + excessDist;
+              }
+            } else {
+              if (v.laneId === 'N2') {
+                v.angle = Math.PI / 2 + v.turnProgress;
+                v.x = 226 + TURN_RADIUS * Math.cos(v.turnProgress);
+                v.y = 268 + TURN_RADIUS * Math.sin(v.turnProgress);
+              } else if (v.laneId === 'S2') {
+                v.angle = -Math.PI / 2 + v.turnProgress;
+                v.x = 474 - TURN_RADIUS * Math.cos(v.turnProgress);
+                v.y = 432 - TURN_RADIUS * Math.sin(v.turnProgress);
+              }
+            }
+          }
         } else {
+          // Gerakan lurus (termasuk kendaraan lajur belok yang sudah 'completed')
           v.x += Math.cos(v.angle) * v.speed * dt;
           v.y += Math.sin(v.angle) * v.speed * dt;
         }
@@ -210,7 +263,7 @@ export default function IntersectionSim({
 
       // Cek apakah baru masuk intersection
       if (!v.inIntersection) {
-        if (v.x > 250 && v.x < 450 && v.y > 250 && v.y < 450) {
+        if (v.x > 245 && v.x < 455 && v.y > 245 && v.y < 455) {
           v.inIntersection = true;
           if (onVehiclePassed) onVehiclePassed();
         }
@@ -261,19 +314,86 @@ export default function IntersectionSim({
       return false;
     }
 
-    // 2. Cek jarak aman dengan kendaraan di depan pada lajur yang sama
+    // 2. Cek jarak aman dengan kendaraan di depan
     const minSafeGap = 36;
+    const TURN_RADIUS = 42;
     for (const other of vehiclesRef.current) {
-      if (other === v || other.laneId !== v.laneId) continue;
+      if (other === v) continue;
 
-      if (v.laneId === 'N1' || v.laneId === 'N2') {
-        if (other.y > v.y && other.y - v.y < minSafeGap) return false;
-      } else if (v.laneId === 'S1' || v.laneId === 'S2') {
-        if (other.y < v.y && v.y - other.y < minSafeGap) return false;
-      } else if (v.laneId === 'E1') {
-        if (other.x < v.x && v.x - other.x < minSafeGap) return false;
-      } else if (v.laneId === 'W1') {
-        if (other.x > v.x && other.x - v.x < minSafeGap) return false;
+      // Kasus A: Lajur lurus standar N1, S1, E1, W1
+      if (v.laneId === other.laneId) {
+        if (v.laneId === 'N1') {
+          if (other.y > v.y && other.y - v.y < minSafeGap) return false;
+        } else if (v.laneId === 'S1') {
+          if (other.y < v.y && v.y - other.y < minSafeGap) return false;
+        } else if (v.laneId === 'E1') {
+          if (other.x < v.x && v.x - other.x < minSafeGap) return false;
+        } else if (v.laneId === 'W1') {
+          if (other.x > v.x && other.x - v.x < minSafeGap) return false;
+        }
+      }
+
+      // Kasus B: Lajur N2 (Utara belok kanan -> ke Barat)
+      if (v.laneId === 'N2') {
+        if (v.turnState === 'approaching') {
+          if (other.laneId === 'N2') {
+            if (other.turnState === 'approaching') {
+              if (other.y > v.y && other.y - v.y < minSafeGap) return false;
+            } else if (other.turnState === 'turning') {
+              if (other.y > v.y && other.y - v.y < minSafeGap) return false;
+            }
+          }
+        } else if (v.turnState === 'turning') {
+          if (other.laneId === 'N2' && other.turnState === 'turning') {
+            if (other.turnProgress > v.turnProgress && (other.turnProgress - v.turnProgress) * TURN_RADIUS < minSafeGap) {
+              return false;
+            }
+          } else if (other.turnState === 'completed' && other.laneId === 'N2') {
+            if (other.x < v.x && (v.x - other.x) < minSafeGap) return false;
+          }
+        } else if (v.turnState === 'completed') {
+          // Bergerak lurus ke Barat di y=310 (bisa di belakang sesama N2 atau E1)
+          if (Math.abs(other.y - v.y) < 15 && other.x < v.x && (v.x - other.x) < minSafeGap) {
+            return false;
+          }
+        }
+      }
+
+      // Kasus C: Lajur S2 (Selatan belok kanan -> ke Timur)
+      if (v.laneId === 'S2') {
+        if (v.turnState === 'approaching') {
+          if (other.laneId === 'S2') {
+            if (other.turnState === 'approaching') {
+              if (other.y < v.y && v.y - other.y < minSafeGap) return false;
+            } else if (other.turnState === 'turning') {
+              if (other.y < v.y && v.y - other.y < minSafeGap) return false;
+            }
+          }
+        } else if (v.turnState === 'turning') {
+          if (other.laneId === 'S2' && other.turnState === 'turning') {
+            if (other.turnProgress > v.turnProgress && (other.turnProgress - v.turnProgress) * TURN_RADIUS < minSafeGap) {
+              return false;
+            }
+          } else if (other.turnState === 'completed' && other.laneId === 'S2') {
+            if (other.x > v.x && (other.x - v.x) < minSafeGap) return false;
+          }
+        } else if (v.turnState === 'completed') {
+          // Bergerak lurus ke Timur di y=390 (bisa di belakang sesama S2 atau W1)
+          if (Math.abs(other.y - v.y) < 15 && other.x > v.x && (other.x - v.x) < minSafeGap) {
+            return false;
+          }
+        }
+      }
+
+      // Kasus D: E1 dan W1 yang mendeteksi mobil belok yang sudah lurus di lajur mereka
+      if (v.laneId === 'E1' && other.laneId === 'N2' && other.turnState === 'completed') {
+        if (Math.abs(other.y - v.y) < 15 && other.x < v.x && (v.x - other.x) < minSafeGap) {
+          return false;
+        }
+      } else if (v.laneId === 'W1' && other.laneId === 'S2' && other.turnState === 'completed') {
+        if (Math.abs(other.y - v.y) < 15 && other.x > v.x && (other.x - v.x) < minSafeGap) {
+          return false;
+        }
       }
     }
 
@@ -314,18 +434,22 @@ export default function IntersectionSim({
       }
     }
 
-    let x = 0, y = 0, angle = 0, isTurningRight = false, turnSpeed = 0;
+    let x = 0, y = 0, angle = 0, isTurningRight = false, turnState = 'none';
     const colors = ['#38BDF8', '#818CF8', '#A78BFA', '#F472B6', '#FBBF24', '#34D399', '#CBD5E1'];
     const color = colors[Math.floor(Math.random() * colors.length)];
 
     if (chosenLane === 'N1') {
       x = 310; y = -30; angle = Math.PI / 2;
     } else if (chosenLane === 'N2') {
-      x = 268; y = -30; angle = Math.PI / 2; isTurningRight = true; turnSpeed = 1.2;
+      x = 268; y = -30; angle = Math.PI / 2;
+      isTurningRight = true;
+      turnState = 'approaching';
     } else if (chosenLane === 'S1') {
       x = 390; y = 730; angle = -Math.PI / 2;
     } else if (chosenLane === 'S2') {
-      x = 432; y = 730; angle = -Math.PI / 2; isTurningRight = true; turnSpeed = 1.2;
+      x = 432; y = 730; angle = -Math.PI / 2;
+      isTurningRight = true;
+      turnState = 'approaching';
     } else if (chosenLane === 'E1') {
       x = 730; y = 310; angle = Math.PI;
     } else if (chosenLane === 'W1') {
@@ -344,7 +468,8 @@ export default function IntersectionSim({
       width: 16,
       inIntersection: false,
       isTurningRight,
-      turnSpeed,
+      turnState,
+      turnProgress: 0,
     });
   };
 
@@ -376,8 +501,8 @@ export default function IntersectionSim({
       mode === 'terhubung'
         ? liveEsp32Status?.state || 'UNKNOWN'
         : fsmState
-        ? fsmState.stateCode
-        : 'STARTUP_ALL_RED';
+          ? fsmState.stateCode
+          : 'STARTUP_ALL_RED';
     const lampColors = getLampColors(currentStateCode);
     drawTrafficLights(ctx, lampColors);
 
@@ -648,11 +773,10 @@ export default function IntersectionSim({
                 key={spd}
                 type="button"
                 onClick={() => onSpeedChange && onSpeedChange(spd)}
-                className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${
-                  simSpeed === spd
+                className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${simSpeed === spd
                     ? 'bg-accent text-surface shadow-xs'
                     : 'bg-surface-2 text-text-muted hover:text-text-main'
-                }`}
+                  }`}
               >
                 {spd}×
               </button>
@@ -711,13 +835,12 @@ export default function IntersectionSim({
                     type="button"
                     disabled={!!activeAmbulance}
                     onClick={() => onCallAmbulance && onCallAmbulance(dir)}
-                    className={`p-2 rounded-lg border text-center transition-all ${
-                      isCurrentActive
+                    className={`p-2 rounded-lg border text-center transition-all ${isCurrentActive
                         ? 'border-error bg-error text-white font-bold'
                         : activeAmbulance
-                        ? 'border-border-line bg-surface opacity-50 cursor-not-allowed text-text-muted'
-                        : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium'
-                    }`}
+                          ? 'border-border-line bg-surface opacity-50 cursor-not-allowed text-text-muted'
+                          : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium'
+                      }`}
                   >
                     <div className="font-bold">{dir}</div>
                     <div className="text-[10px] text-text-muted truncate">
