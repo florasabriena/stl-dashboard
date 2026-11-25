@@ -4,6 +4,11 @@ import {
   TL_HEAD_TO_GROUP,
   DIRECTION_TO_PHASE,
   SIMULATION_PARAMS,
+  AMBULANCE_SPEED_KMH,
+  PIXELS_PER_METER,
+  AMBULANCE_SPAWN_DISTANCE_METERS,
+  QUEUE_DENSITY_LEVELS,
+  getQueueDensityInfo,
 } from '../config/constants.js';
 import { getLampColors } from '../lib/fsm.js';
 
@@ -27,10 +32,23 @@ export default function IntersectionSim({
   liveEsp32Status = null,
   simSpeed = 1,
   isPaused = false,
-  activeAmbulance = null,
+  activeAmbulances = [],
+  prioritizedAmbulanceId = null,
+  queueCount = 0,
+  rawQueueCount = 0,
+  queueDensityInfo = QUEUE_DENSITY_LEVELS.RENDAH,
+  queueOverride = 'auto',
+  onQueueOverrideChange,
+  onQueueCountChange,
   onCallAmbulance,
+  onSpawnMultiScenario,
   onCancelAmbulance,
   onAmbulancePassed,
+  onAmbulanceTelemetry,
+  onFiveMeterCheckpoint,
+  onAmbulanceExited,
+  movementLogs = [],
+  onClearMovementLogs,
   onVehiclePassed,
   onSpeedChange,
   onTogglePause,
@@ -38,46 +56,58 @@ export default function IntersectionSim({
 }) {
   const canvasRef = useRef(null);
 
-  // Status internal kendaraan
+  // Status internal kendaraan & multi-ambulans
   const vehiclesRef = useRef([]);
   const lastSpawnTimeRef = useRef(0);
-  const ambulanceRef = useRef(null);
+  const ambulancesRef = useRef([]);
+  const lastTelemetrySyncRef = useRef(0);
+  const lastReportedQueueRef = useRef(-1);
   const [trafficScenario, setTrafficScenario] = useState('Baseline');
+  const [selectedPatientType, setSelectedPatientType] = useState('darurat');
 
-  // Sinkronisasi ambulans dari props
+  // Sinkronisasi daftar multi-ambulans dari props
   useEffect(() => {
-    if (activeAmbulance && !ambulanceRef.current) {
-      // Buat objek ambulans baru di awal lajur arah kedatangan
-      const dir = activeAmbulance.direction;
+    const activeIds = new Set(activeAmbulances.map((a) => a.requestId));
+
+    // Hapus ambulans yang dibatalkan dari canvas
+    ambulancesRef.current = ambulancesRef.current.filter((a) =>
+      activeIds.has(a.requestId)
+    );
+
+    // Tambahkan ambulans baru yang belum ada di canvas
+    const spawnOffsetPx = AMBULANCE_SPAWN_DISTANCE_METERS * PIXELS_PER_METER; // 155m = 232.5px
+    for (const ambProp of activeAmbulances) {
+      const exists = ambulancesRef.current.some(
+        (a) => a.requestId === ambProp.requestId
+      );
+      if (exists) continue;
+
+      const dir = ambProp.direction;
       let startX = 0, startY = 0, vx = 0, vy = 0, angle = 0, laneId = '';
 
       if (dir === 'Utara') {
-        // TL2 (lurus)
         startX = 310;
-        startY = -40;
+        startY = 230 - spawnOffsetPx;
         vx = 0;
         vy = SIMULATION_PARAMS.ambulanceSpeed;
         angle = Math.PI / 2;
         laneId = 'N1';
       } else if (dir === 'Selatan') {
-        // TL1 (lurus)
         startX = 390;
-        startY = 740;
+        startY = 470 + spawnOffsetPx;
         vx = 0;
         vy = -SIMULATION_PARAMS.ambulanceSpeed;
         angle = -Math.PI / 2;
         laneId = 'S1';
       } else if (dir === 'Timur') {
-        // TL3
-        startX = 740;
+        startX = 455 + spawnOffsetPx;
         startY = 310;
         vx = -SIMULATION_PARAMS.ambulanceSpeed;
         vy = 0;
         angle = Math.PI;
         laneId = 'E1';
       } else if (dir === 'Barat') {
-        // TL4
-        startX = -40;
+        startX = 245 - spawnOffsetPx;
         startY = 390;
         vx = SIMULATION_PARAMS.ambulanceSpeed;
         vy = 0;
@@ -85,30 +115,39 @@ export default function IntersectionSim({
         laneId = 'W1';
       }
 
-      ambulanceRef.current = {
-        id: 'ambulance',
+      ambulancesRef.current.push({
+        id: ambProp.requestId,
+        requestId: ambProp.requestId,
+        label: ambProp.label || 'AMB',
         direction: dir,
+        patientType: ambProp.patientType || 'darurat',
+        priorityLevel: ambProp.priorityLevel || 1,
         laneId,
         x: startX,
         y: startY,
         vx,
         vy,
         angle,
-        length: 44,
-        width: 22,
+        length: 40,
+        width: 20,
+        inIntersection: false,
         passed: false,
         flashTimer: 0,
-        requestId: activeAmbulance.requestId,
-      };
-    } else if (!activeAmbulance && ambulanceRef.current) {
-      ambulanceRef.current = null;
+        distanceTraveled: 0,
+        lastLoggedMeters: 0,
+        elapsedSimSeconds: 0,
+        lastCheckpointTime: 0,
+        currentSpeedKmh: AMBULANCE_SPEED_KMH,
+        distanceToStopLine: AMBULANCE_SPAWN_DISTANCE_METERS,
+      });
     }
-  }, [activeAmbulance]);
+  }, [activeAmbulances]);
 
   // Handle reset
   const handleReset = useCallback(() => {
     vehiclesRef.current = [];
-    ambulanceRef.current = null;
+    ambulancesRef.current = [];
+    lastReportedQueueRef.current = -1;
     if (onReset) onReset();
   }, [onReset]);
 
@@ -126,7 +165,7 @@ export default function IntersectionSim({
 
       // Update simulasi kendaraan jika tidak pause
       if (!isPaused && dt > 0) {
-        updateSimulation(dt);
+        updateSimulation(dt, now);
       }
 
       // Gambar keseluruhan canvas
@@ -137,10 +176,20 @@ export default function IntersectionSim({
 
     animationFrameId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [fsmState, isPaused, simSpeed, trafficScenario]);
+  }, [fsmState, isPaused, simSpeed, trafficScenario, queueDensityInfo, prioritizedAmbulanceId]);
 
-  // Update posisi kendaraan & ambulans
-  const updateSimulation = (dt) => {
+  // Helper hitung jarak ke garis henti (meter)
+  const computeDistanceToStopLineMeters = (amb) => {
+    let px = 0;
+    if (amb.direction === 'Utara') px = 230 - amb.y;
+    else if (amb.direction === 'Selatan') px = amb.y - 470;
+    else if (amb.direction === 'Timur') px = amb.x - 455;
+    else if (amb.direction === 'Barat') px = 245 - amb.x;
+    return Math.max(0, px / PIXELS_PER_METER);
+  };
+
+  // Update posisi kendaraan & multi-ambulans
+  const updateSimulation = (dt, nowMs = performance.now()) => {
     const currentStateCode =
       mode === 'terhubung'
         ? liveEsp32Status?.state || 'UNKNOWN'
@@ -157,18 +206,59 @@ export default function IntersectionSim({
       trySpawnVehicle();
     }
 
-    // Update ambulans
-    const amb = ambulanceRef.current;
-    if (amb) {
-      amb.flashTimer = (amb.flashTimer || 0) + dt * 6; // Frekuensi kedip lampu darurat
+    // Update multi-ambulans (kecepatan 40 km/jam = ~16.67 px/s)
+    const remainingAmbs = [];
+    const exitedIds = [];
 
-      // Cek apakah ambulans bisa jalan melewati lampu
-      // Ambulans diprioritaskan: jika mendekati stop line, lampu hijau ditahan oleh FSM
+    for (const amb of ambulancesRef.current) {
+      const flashSpeed = amb.patientType === 'darurat' ? 7 : 3;
+      amb.flashTimer = (amb.flashTimer || 0) + dt * flashSpeed;
+      amb.elapsedSimSeconds += dt;
+
       const canAmbMove = checkCanMove(amb, lampColors, true);
       if (canAmbMove) {
         amb.x += amb.vx * dt;
         amb.y += amb.vy * dt;
+        const stepPx = SIMULATION_PARAMS.ambulanceSpeed * dt;
+        const stepMeters = stepPx / PIXELS_PER_METER;
+        amb.distanceTraveled += stepMeters;
+        amb.currentSpeedKmh = AMBULANCE_SPEED_KMH;
+
+        // Catat perpindahan waktu setiap 5 meter
+        while (amb.distanceTraveled - amb.lastLoggedMeters >= 5) {
+          const segStart = amb.lastLoggedMeters;
+          const segEnd = segStart + 5;
+          const deltaSec = amb.elapsedSimSeconds - amb.lastCheckpointTime;
+          amb.lastLoggedMeters = segEnd;
+          amb.lastCheckpointTime = amb.elapsedSimSeconds;
+          if (onFiveMeterCheckpoint) {
+            onFiveMeterCheckpoint({
+              id: `${amb.requestId}-${segEnd}`,
+              ambulanceLabel: amb.label,
+              direction: amb.direction,
+              patientType: amb.patientType,
+              segmentLabel: `${segStart}–${segEnd} m`,
+              distanceFromStopLine: Math.max(
+                0,
+                Number((AMBULANCE_SPAWN_DISTANCE_METERS - segEnd).toFixed(1))
+              ),
+              deltaSeconds: Number(deltaSec.toFixed(2)),
+              cumulativeSeconds: Number(amb.elapsedSimSeconds.toFixed(2)),
+              speedKmh: AMBULANCE_SPEED_KMH,
+            });
+          }
+        }
+      } else {
+        amb.currentSpeedKmh = 0;
       }
+
+      if (!amb.inIntersection) {
+        if (amb.x > 245 && amb.x < 455 && amb.y > 245 && amb.y < 455) {
+          amb.inIntersection = true;
+        }
+      }
+
+      amb.distanceToStopLine = computeDistanceToStopLineMeters(amb);
 
       // Deteksi saat ambulans melintasi persimpangan
       if (!amb.passed) {
@@ -188,8 +278,15 @@ export default function IntersectionSim({
 
       // Despawn ambulans jika keluar batas canvas
       if (amb.x < -80 || amb.x > 780 || amb.y < -80 || amb.y > 780) {
-        ambulanceRef.current = null;
+        exitedIds.push(amb.requestId);
+      } else {
+        remainingAmbs.push(amb);
       }
+    }
+    ambulancesRef.current = remainingAmbs;
+
+    if (exitedIds.length > 0 && onAmbulanceExited) {
+      exitedIds.forEach((id) => onAmbulanceExited(id));
     }
 
     // Update kendaraan umum
@@ -275,6 +372,29 @@ export default function IntersectionSim({
       }
     }
     vehiclesRef.current = updatedVehicles;
+
+    // Laporkan jumlah antrean & telemetri multi-ambulans ke dashboard setiap ~150 ms
+    if (nowMs - lastTelemetrySyncRef.current >= 150) {
+      lastTelemetrySyncRef.current = nowMs;
+
+      const queuedCount = vehiclesRef.current.filter((v) => !v.inIntersection).length;
+      if (queuedCount !== lastReportedQueueRef.current) {
+        lastReportedQueueRef.current = queuedCount;
+        if (onQueueCountChange) onQueueCountChange(queuedCount);
+      }
+
+      if (onAmbulanceTelemetry && ambulancesRef.current.length > 0) {
+        onAmbulanceTelemetry(
+          ambulancesRef.current.map((a) => ({
+            requestId: a.requestId,
+            distanceToStopLine: Number(a.distanceToStopLine.toFixed(1)),
+            distanceTraveled: Number(a.distanceTraveled.toFixed(1)),
+            currentSpeedKmh: a.currentSpeedKmh,
+            passed: a.passed,
+          }))
+        );
+      }
+    }
   };
 
   // Cek apakah kendaraan / ambulans boleh melaju
@@ -397,9 +517,9 @@ export default function IntersectionSim({
       }
     }
 
-    // Jika kendaraan ada di belakang ambulans
-    const amb = ambulanceRef.current;
-    if (!isAmb && amb && amb.laneId === v.laneId) {
+    // Jika kendaraan atau ambulans lain ada di depan pada lajur yang sama
+    for (const amb of ambulancesRef.current) {
+      if (amb === v || amb.laneId !== v.laneId) continue;
       if (v.laneId === 'N1' || v.laneId === 'N2') {
         if (amb.y > v.y && amb.y - v.y < minSafeGap) return false;
       } else if (v.laneId === 'S1' || v.laneId === 'S2') {
@@ -496,6 +616,9 @@ export default function IntersectionSim({
     // 4. Zebra Cross (Pedestrian Crossings)
     drawZebraCrossings(ctx);
 
+    // 4b. Penanda Zona Jarak Trigger Ambulans (50m, 100m, 150m)
+    drawDistanceMarkers(ctx);
+
     // 5. Kepala Lampu TL1 - TL6
     const currentStateCode =
       mode === 'terhubung'
@@ -511,10 +634,81 @@ export default function IntersectionSim({
       drawCar(ctx, v);
     }
 
-    // 7. Gambar Ambulans (jika aktif)
-    if (ambulanceRef.current) {
-      drawAmbulance(ctx, ambulanceRef.current);
+    // 7. Gambar Multi-Ambulans (jika aktif)
+    for (const amb of ambulancesRef.current) {
+      drawAmbulance(ctx, amb);
     }
+  };
+
+  // Gambar Garis Zona Jarak Trigger Lampu Hijau Ambulans (50m, 100m, 150m)
+  const drawDistanceMarkers = (ctx) => {
+    const activeMeters = queueDensityInfo?.triggerDistanceMeters || 50;
+    const markers = [
+      { meters: 50, color: '#22C55E' },
+      { meters: 100, color: '#F59E0B' },
+      { meters: 150, color: '#EF4444' },
+    ];
+
+    ctx.save();
+    ctx.font = 'bold 9px monospace';
+
+    for (const m of markers) {
+      const offset = m.meters * PIXELS_PER_METER;
+      const isActive = m.meters === activeMeters;
+      ctx.strokeStyle = isActive ? m.color : 'rgba(148, 163, 184, 0.25)';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.setLineDash(isActive ? [6, 4] : [3, 5]);
+
+      // Utara (y = 230 - offset)
+      const yN = 230 - offset;
+      if (yN > 2) {
+        ctx.beginPath();
+        ctx.moveTo(245, yN);
+        ctx.lineTo(348, yN);
+        ctx.stroke();
+        ctx.fillStyle = isActive ? m.color : 'rgba(148, 163, 184, 0.55)';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${m.meters}m${isActive ? ' ★' : ''}`, 240, yN + 3);
+      }
+
+      // Selatan (y = 470 + offset)
+      const yS = 470 + offset;
+      if (yS < 698) {
+        ctx.beginPath();
+        ctx.moveTo(352, yS);
+        ctx.lineTo(455, yS);
+        ctx.stroke();
+        ctx.fillStyle = isActive ? m.color : 'rgba(148, 163, 184, 0.55)';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${m.meters}m${isActive ? ' ★' : ''}`, 460, yS + 3);
+      }
+
+      // Barat (x = 245 - offset)
+      const xW = 245 - offset;
+      if (xW > 2) {
+        ctx.beginPath();
+        ctx.moveTo(xW, 352);
+        ctx.lineTo(xW, 440);
+        ctx.stroke();
+        ctx.fillStyle = isActive ? m.color : 'rgba(148, 163, 184, 0.55)';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${m.meters}m`, xW, 453);
+      }
+
+      // Timur (x = 455 + offset)
+      const xE = 455 + offset;
+      if (xE < 698) {
+        ctx.beginPath();
+        ctx.moveTo(xE, 260);
+        ctx.lineTo(xE, 348);
+        ctx.stroke();
+        ctx.fillStyle = isActive ? m.color : 'rgba(148, 163, 184, 0.55)';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${m.meters}m`, xE, 254);
+      }
+    }
+
+    ctx.restore();
   };
 
   // Gambar Marka Jalan
@@ -676,55 +870,75 @@ export default function IntersectionSim({
     ctx.restore();
   };
 
-  // Gambar Ambulans
+  // Gambar Ambulans (membedakan pasien Darurat vs Non-Darurat)
   const drawAmbulance = (ctx, amb) => {
+    const isDarurat = amb.patientType !== 'non-darurat';
+    const isPrioritized = amb.requestId === prioritizedAmbulanceId;
+
     ctx.save();
     ctx.translate(amb.x, amb.y);
     ctx.rotate(amb.angle);
 
-    // Lingkaran Peringatan Berdenyut (Simulasi Prioritas)
-    const pulseRadius = 32 + (Math.sin(amb.flashTimer * 2) + 1) * 6;
+    // Lingkaran Peringatan Berdenyut
+    const pulseRadius = (isDarurat ? 30 : 24) + (Math.sin(amb.flashTimer * 2) + 1) * 5;
     ctx.beginPath();
     ctx.arc(0, 0, pulseRadius, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(239, 68, 68, 0.4)';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = isDarurat
+      ? isPrioritized
+        ? 'rgba(239, 68, 68, 0.65)'
+        : 'rgba(239, 68, 68, 0.35)'
+      : 'rgba(245, 158, 11, 0.35)';
+    ctx.lineWidth = isPrioritized ? 2.5 : 1.5;
     ctx.stroke();
 
     // Body Putih Ambulans
-    ctx.fillStyle = '#FFFFFF';
-    ctx.strokeStyle = '#CBD5E1';
-    ctx.lineWidth = 1;
+    ctx.fillStyle = isDarurat ? '#FFFFFF' : '#FEF3C7';
+    ctx.strokeStyle = isDarurat ? '#EF4444' : '#F59E0B';
+    ctx.lineWidth = 1.5;
     ctx.fillRect(-amb.length / 2, -amb.width / 2, amb.length, amb.width);
     ctx.strokeRect(-amb.length / 2, -amb.width / 2, amb.length, amb.width);
 
-    // Palang Merah di Atap
-    ctx.fillStyle = '#EF4444';
-    ctx.fillRect(-3, -7, 6, 14);
-    ctx.fillRect(-7, -3, 14, 6);
+    // Palang Medis di Atap
+    ctx.fillStyle = isDarurat ? '#EF4444' : '#D97706';
+    ctx.fillRect(-3, -6, 6, 12);
+    ctx.fillRect(-6, -3, 12, 6);
 
     // Kaca Depan & Belakang
     ctx.fillStyle = '#1E293B';
-    ctx.fillRect(amb.length / 2 - 10, -amb.width / 2 + 2, 6, amb.width - 4);
+    ctx.fillRect(amb.length / 2 - 9, -amb.width / 2 + 2, 5, amb.width - 4);
     ctx.fillRect(-amb.length / 2 + 2, -amb.width / 2 + 2, 3, amb.width - 4);
 
-    // Lampu Bar Darurat (Merah & Biru bergantian kedip)
+    // Lampu Bar Darurat
     const isRedFlash = Math.floor(amb.flashTimer) % 2 === 0;
-    ctx.fillStyle = isRedFlash ? '#EF4444' : '#3B82F6';
-    ctx.shadowColor = ctx.fillStyle;
-    ctx.shadowBlur = 10;
-    ctx.fillRect(-1, -amb.width / 2 - 2, 4, 3);
-    ctx.fillStyle = !isRedFlash ? '#EF4444' : '#3B82F6';
-    ctx.shadowColor = ctx.fillStyle;
-    ctx.fillRect(-1, amb.width / 2 - 1, 4, 3);
+    if (isDarurat) {
+      ctx.fillStyle = isRedFlash ? '#EF4444' : '#3B82F6';
+      ctx.shadowColor = ctx.fillStyle;
+      ctx.shadowBlur = 10;
+      ctx.fillRect(-1, -amb.width / 2 - 2, 4, 3);
+      ctx.fillStyle = !isRedFlash ? '#EF4444' : '#3B82F6';
+      ctx.shadowColor = ctx.fillStyle;
+      ctx.fillRect(-1, amb.width / 2 - 1, 4, 3);
+    } else {
+      ctx.fillStyle = isRedFlash ? '#F59E0B' : '#94A3B8';
+      ctx.shadowColor = '#F59E0B';
+      ctx.shadowBlur = 6;
+      ctx.fillRect(-1, -amb.width / 2 - 2, 4, 3);
+      ctx.fillRect(-1, amb.width / 2 - 1, 4, 3);
+    }
 
     ctx.restore();
 
     // Label Ambulans Floating
     ctx.save();
-    ctx.fillStyle = '#EF4444';
-    ctx.font = 'bold 10px sans-serif';
+    ctx.fillStyle = isDarurat ? '#EF4444' : '#F59E0B';
+    ctx.font = 'bold 9.5px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('🚑 AMBULANS (simulasi)', amb.x, amb.y - 28);
+    const distText = amb.passed ? 'LEWAT' : `${Math.round(amb.distanceToStopLine)}m`;
+    ctx.fillText(
+      `🚑 ${amb.label} (${isDarurat ? 'DARURAT' : 'NON-DARURAT'}) · ${distText}`,
+      amb.x,
+      amb.y - 26
+    );
     ctx.restore();
   };
 
@@ -741,13 +955,13 @@ export default function IntersectionSim({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {activeAmbulance && (
+          {activeAmbulances.length > 0 && (
             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-error text-white animate-pulse">
-              PRIORITAS AKTIF (simulasi)
+              {activeAmbulances.length} AMBULANS AKTIF (simulasi)
             </span>
           )}
           <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-surface-2 text-text-muted">
-            700×700 px
+            {AMBULANCE_SPEED_KMH} km/jam · 700×700 px
           </span>
         </div>
       </div>
@@ -812,59 +1026,283 @@ export default function IntersectionSim({
           </div>
         </div>
 
-        {/* Tombol Panggil Ambulans dari 4 Arah (Hanya Mode Simulasi) */}
+        {/* Panel Status Antrean & Jarak Trigger Lampu Hijau (50m / 100m / 150m) */}
         {mode === 'simulasi' && (
-          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-bold text-text-main flex items-center gap-1.5">
-                <span>🚑</span> Panggil Ambulans (simulasi)
-              </span>
-              <span className="text-[10px] text-text-muted">
-                Pilih ARAH kedatangan ambulans
-              </span>
+          <div className="rounded-lg bg-surface-2 p-3 border border-border-line flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-text-main">
+                  Kepadatan Antrean:
+                </span>
+                <span
+                  className="text-[11px] font-bold px-2 py-0.5 rounded-full text-slate-950"
+                  style={{ backgroundColor: queueDensityInfo.color }}
+                >
+                  {queueDensityInfo.label.toUpperCase()} ({queueCount} kend.)
+                </span>
+                <span className="text-[11px] font-mono font-bold text-accent">
+                  → Lampu Hijau di {queueDensityInfo.triggerDistanceMeters} m
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <label className="text-text-muted">Deteksi Antrean:</label>
+                <select
+                  value={queueOverride}
+                  onChange={(e) => onQueueOverrideChange && onQueueOverrideChange(e.target.value)}
+                  className="text-[11px] rounded-md bg-surface border border-border-line px-2 py-0.5 text-text-main outline-hidden"
+                >
+                  <option value="auto">Otomatis ({rawQueueCount} di canvas)</option>
+                  <option value="rendah">Simulasi Rendah (≤ 5 · 50 m)</option>
+                  <option value="sedang">Simulasi Sedang (≤ 15 · 100 m)</option>
+                  <option value="tinggi">Simulasi Tinggi (&gt; 15 · 150 m)</option>
+                </select>
+              </div>
             </div>
 
+            <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+              {[
+                { key: 'rendah', label: 'Rendah (≤ 5)', dist: '50 m', color: 'border-success/50 text-success bg-success/10' },
+                { key: 'sedang', label: 'Sedang (≤ 15)', dist: '100 m', color: 'border-warning/50 text-warning bg-warning/10' },
+                { key: 'tinggi', label: 'Tinggi (> 15)', dist: '150 m', color: 'border-error/50 text-error bg-error/10' },
+              ].map((tier) => {
+                const isActive = queueDensityInfo.id === tier.key;
+                return (
+                  <div
+                    key={tier.key}
+                    className={`px-2 py-1 rounded border text-center font-medium transition-all ${
+                      isActive ? `${tier.color} font-bold ring-1 ring-current` : 'border-border-line bg-surface text-text-muted opacity-70'
+                    }`}
+                  >
+                    {tier.label} → Hijau {tier.dist}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Panel Multi-Ambulans & Prioritas Pasien (Hanya Mode Simulasi) */}
+        {mode === 'simulasi' && (
+          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+              <span className="text-xs font-bold text-text-main flex items-center gap-1.5">
+                <span>🚑</span> Skenario Multi-Ambulans (simulasi · {AMBULANCE_SPEED_KMH} km/jam)
+              </span>
+              <button
+                type="button"
+                onClick={onSpawnMultiScenario}
+                className="px-2.5 py-1 rounded-md bg-accent/15 border border-accent/40 text-accent hover:bg-accent/25 text-[11px] font-bold transition-colors cursor-pointer"
+              >
+                ⚡ Simulasi Multi-Ambulans (3 Arah)
+              </button>
+            </div>
+
+            {/* Pilihan Jenis Pasien */}
+            <div className="flex flex-wrap items-center gap-2 mb-2.5 text-xs">
+              <span className="text-[11px] text-text-muted font-medium">Jenis Pasien:</span>
+              <button
+                type="button"
+                onClick={() => setSelectedPatientType('darurat')}
+                className={`px-2.5 py-1 rounded-md border text-[11px] font-bold transition-all cursor-pointer ${
+                  selectedPatientType === 'darurat'
+                    ? 'bg-error text-white border-error shadow-xs'
+                    : 'bg-surface border-border-line text-text-muted hover:text-text-main'
+                }`}
+              >
+                🚨 Darurat (Prioritas Utama)
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedPatientType('non-darurat')}
+                className={`px-2.5 py-1 rounded-md border text-[11px] font-bold transition-all cursor-pointer ${
+                  selectedPatientType === 'non-darurat'
+                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
+                    : 'bg-surface border-border-line text-text-muted hover:text-text-main'
+                }`}
+              >
+                🏥 Non-Darurat (Sekunder)
+              </button>
+            </div>
+
+            {/* Tombol Arah Kedatangan (Bisa panggil > 1 ambulans dari arah berbeda) */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               {['Utara', 'Selatan', 'Timur', 'Barat'].map((dir) => {
                 const info = DIRECTION_TO_PHASE[dir];
-                const isCurrentActive = activeAmbulance && activeAmbulance.direction === dir;
+                const activeInDir = activeAmbulances.find(
+                  (a) => a.direction === dir && !a.passed
+                );
 
                 return (
                   <button
                     key={dir}
                     type="button"
-                    disabled={!!activeAmbulance}
-                    onClick={() => onCallAmbulance && onCallAmbulance(dir)}
-                    className={`p-2 rounded-lg border text-center transition-all ${isCurrentActive
-                        ? 'border-error bg-error text-white font-bold'
-                        : activeAmbulance
-                          ? 'border-border-line bg-surface opacity-50 cursor-not-allowed text-text-muted'
-                          : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium'
-                      }`}
+                    disabled={!!activeInDir}
+                    onClick={() =>
+                      onCallAmbulance && onCallAmbulance(dir, selectedPatientType)
+                    }
+                    className={`p-2 rounded-lg border text-center transition-all ${
+                      activeInDir
+                        ? activeInDir.patientType === 'darurat'
+                          ? 'border-error bg-error/20 text-error font-bold cursor-not-allowed'
+                          : 'border-amber-500 bg-amber-500/20 text-amber-400 font-bold cursor-not-allowed'
+                        : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium cursor-pointer'
+                    }`}
                   >
                     <div className="font-bold">{dir}</div>
                     <div className="text-[10px] text-text-muted truncate">
-                      {info.lane} → Fase {info.targetPhase}
+                      {activeInDir
+                        ? `${activeInDir.label} (${activeInDir.patientType === 'darurat' ? 'Darurat' : 'Non-Darurat'})`
+                        : `${info.lane} → Fase ${info.targetPhase}`}
                     </div>
                   </button>
                 );
               })}
             </div>
 
-            {activeAmbulance && (
-              <div className="mt-2.5 pt-2 border-t border-border-line flex items-center justify-between">
-                <span className="text-xs text-error font-medium">
-                  Ambulans aktif dari arah {activeAmbulance.direction} (Fase {DIRECTION_TO_PHASE[activeAmbulance.direction]?.targetPhase})
-                </span>
-                <button
-                  type="button"
-                  onClick={onCancelAmbulance}
-                  className="px-3 py-1 rounded-md bg-error/10 border border-error/40 text-error hover:bg-error/20 text-xs font-bold transition-colors"
-                >
-                  Batalkan Panggilan
-                </button>
+            {/* Daftar Ambulans Aktif & Status Prioritas */}
+            {activeAmbulances.length > 0 && (
+              <div className="mt-3 pt-2.5 border-t border-border-line flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-[11px] mb-0.5">
+                  <span className="font-bold text-text-main">
+                    Ambulans Aktif ({activeAmbulances.length} unit)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onCancelAmbulance && onCancelAmbulance(null)}
+                    className="px-2 py-0.5 rounded bg-error/10 border border-error/40 text-error hover:bg-error/20 text-[10px] font-bold transition-colors cursor-pointer"
+                  >
+                    Batalkan Semua
+                  </button>
+                </div>
+
+                {activeAmbulances.map((amb) => {
+                  const isDarurat = amb.patientType === 'darurat';
+                  const isPrioritized = amb.requestId === prioritizedAmbulanceId;
+                  return (
+                    <div
+                      key={amb.requestId}
+                      className={`flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-md border text-[11px] ${
+                        isPrioritized
+                          ? 'border-error/60 bg-error/10'
+                          : 'border-border-line bg-surface'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-mono font-bold text-text-main">
+                          {amb.label}
+                        </span>
+                        <span className="text-text-muted">· {amb.direction}</span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                            isDarurat
+                              ? 'bg-error text-white'
+                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                          }`}
+                        >
+                          {isDarurat ? 'DARURAT' : 'NON-DARURAT'}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                            amb.passed
+                              ? 'bg-success/20 text-success'
+                              : isPrioritized
+                                ? 'bg-accent/20 text-accent animate-pulse'
+                                : 'bg-surface-2 text-text-muted'
+                          }`}
+                        >
+                          {amb.passed
+                            ? 'MELINTAS'
+                            : isPrioritized
+                              ? 'DIPRIORITASKAN'
+                              : 'MENUNGGU'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2 font-mono text-[10px]">
+                        <span className="text-text-muted">
+                          Sisa: <strong className="text-text-main">{amb.distanceToStopLine.toFixed(1)} m</strong>
+                        </span>
+                        <span className="text-text-muted">
+                          <strong className="text-accent">{amb.currentSpeedKmh} km/jam</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onCancelAmbulance && onCancelAmbulance(amb.requestId)}
+                          className="text-error hover:underline font-sans font-semibold cursor-pointer"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Tabel Catatan Pergerakan Ambulans per 5 Meter (40 km/jam) */}
+        {mode === 'simulasi' && (
+          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <span className="text-xs font-bold text-text-main">
+                  ⏱️ Catatan Waktu Perpindahan Ambulans (per 5 Meter)
+                </span>
+                <p className="text-[10px] text-text-muted">
+                  Kecepatan target {AMBULANCE_SPEED_KMH} km/jam (11,11 m/s · ideal 0,45 dtk per 5 m)
+                </p>
+              </div>
+              {movementLogs.length > 0 && onClearMovementLogs && (
+                <button
+                  type="button"
+                  onClick={onClearMovementLogs}
+                  className="text-[10px] text-text-muted hover:text-text-main px-2 py-0.5 rounded bg-surface border border-border-line cursor-pointer"
+                >
+                  Bersihkan
+                </button>
+              )}
+            </div>
+
+            <div className="max-h-40 overflow-y-auto rounded border border-border-line bg-surface">
+              {movementLogs.length === 0 ? (
+                <div className="text-[11px] text-text-muted text-center py-4">
+                  Belum ada catatan pergerakan. Panggil ambulans untuk merekam waktu perpindahan tiap 5 meter.
+                </div>
+              ) : (
+                <table className="w-full text-left font-mono text-[10.5px] border-collapse">
+                  <thead className="sticky top-0 bg-surface-2 text-text-muted border-b border-border-line">
+                    <tr>
+                      <th className="py-1.5 px-2">Unit</th>
+                      <th className="py-1.5 px-2">Segmen</th>
+                      <th className="py-1.5 px-2">Sisa Garis Henti</th>
+                      <th className="py-1.5 px-2">Waktu / 5m</th>
+                      <th className="py-1.5 px-2">Kumulatif</th>
+                      <th className="py-1.5 px-2">Kecepatan</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {movementLogs.map((row) => (
+                      <tr key={row.id} className="border-b border-border-line/50 last:border-0">
+                        <td className="py-1 px-2 font-bold text-text-main">
+                          {row.ambulanceLabel} ({row.direction[0]} ·{' '}
+                          <span className={row.patientType === 'darurat' ? 'text-error' : 'text-amber-400'}>
+                            {row.patientType === 'darurat' ? 'DRT' : 'NON'}
+                          </span>
+                          )
+                        </td>
+                        <td className="py-1 px-2 text-accent">{row.segmentLabel}</td>
+                        <td className="py-1 px-2 text-text-muted">{row.distanceFromStopLine} m</td>
+                        <td className="py-1 px-2 font-bold text-success">{row.deltaSeconds.toFixed(2)} dtk</td>
+                        <td className="py-1 px-2 text-text-muted">{row.cumulativeSeconds.toFixed(2)} dtk</td>
+                        <td className="py-1 px-2 text-text-main">{row.speedKmh} km/jam</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
           </div>
         )}
       </div>

@@ -20,6 +20,9 @@ import {
   DIRECTION_TO_PHASE,
   SIMULATION_PARAMS,
   MAP_CONFIG,
+  AMBULANCE_SPEED_KMH,
+  AMBULANCE_SPAWN_DISTANCE_METERS,
+  getQueueDensityInfo,
 } from './config/constants';
 import {
   subscribeToFirebaseConnection,
@@ -37,23 +40,46 @@ function formatTimestamp() {
   return `${m}:${s}`;
 }
 
-const getSimulatedGpsPosition = (ambulance) => {
-  if (!ambulance) return null;
+const getSimulatedGpsPositions = (ambulances) => {
+  if (!Array.isArray(ambulances) || ambulances.length === 0) return [];
   const baseLat = MAP_CONFIG.latitude;
   const baseLng = MAP_CONFIG.longitude;
-  const offset = 0.0035; // ~380m
-  switch (ambulance.direction) {
-    case 'Utara':
-      return { lat: baseLat + offset, lng: baseLng, direction: 'Utara' };
-    case 'Selatan':
-      return { lat: baseLat - offset, lng: baseLng, direction: 'Selatan' };
-    case 'Timur':
-      return { lat: baseLat, lng: baseLng + offset, direction: 'Timur' };
-    case 'Barat':
-      return { lat: baseLat, lng: baseLng - offset, direction: 'Barat' };
-    default:
-      return null;
-  }
+  const maxOffset = 0.0035; // ~380m max
+
+  return ambulances.map((amb) => {
+    const ratio = Math.max(
+      0.05,
+      Math.min(1, (amb.distanceToStopLine ?? 150) / AMBULANCE_SPAWN_DISTANCE_METERS)
+    );
+    const offset = maxOffset * ratio;
+    let lat = baseLat;
+    let lng = baseLng;
+    switch (amb.direction) {
+      case 'Utara':
+        lat = baseLat + offset;
+        break;
+      case 'Selatan':
+        lat = baseLat - offset;
+        break;
+      case 'Timur':
+        lng = baseLng + offset;
+        break;
+      case 'Barat':
+        lng = baseLng - offset;
+        break;
+      default:
+        break;
+    }
+    return {
+      requestId: amb.requestId,
+      label: amb.label,
+      lat,
+      lng,
+      direction: amb.direction,
+      patientType: amb.patientType,
+      distanceToStopLine: amb.distanceToStopLine,
+    };
+  });
 };
 
 export default function App() {
@@ -67,10 +93,29 @@ export default function App() {
   const [simSpeed, setSimSpeed] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
 
-  // Status Jalur Data & Ambulans (Simulasi)
+  // Status Jalur Data & Multi-Ambulans (Simulasi)
   const [pipelineStep, setPipelineStep] = useState(0);
-  const [activeAmbulance, setActiveAmbulance] = useState(null);
+  const [activeAmbulances, setActiveAmbulances] = useState([]);
+  const [prioritizedAmbulanceId, setPrioritizedAmbulanceId] = useState(null);
+  const [queueCount, setQueueCount] = useState(0);
+  const [queueOverride, setQueueOverride] = useState('auto'); // 'auto' | 'rendah' | 'sedang' | 'tinggi'
+  const [movementLogs, setMovementLogs] = useState([]);
   const ambulanceTimersRef = useRef([]);
+  const ambCounterRef = useRef(0);
+  const triggeringReqIdRef = useRef(null);
+
+  // Hitung antrean efektif & jarak trigger lampu hijau (50m / 100m / 150m)
+  const effectiveQueueCount = useMemo(() => {
+    if (queueOverride === 'rendah') return 3;
+    if (queueOverride === 'sedang') return 10;
+    if (queueOverride === 'tinggi') return 18;
+    return queueCount;
+  }, [queueCount, queueOverride]);
+
+  const queueDensityInfo = useMemo(
+    () => getQueueDensityInfo(effectiveQueueCount),
+    [effectiveQueueCount]
+  );
 
   // Log simulasi
   const [logs, setLogs] = useState(() => [
@@ -269,7 +314,8 @@ export default function App() {
             `[SIMULASI] Prioritas selesai. USB-Serial: {"type":"DONE","id":"${nextState.simulationPriority.requestId}"}`
           );
           setPipelineStep(0);
-          setActiveAmbulance(null);
+          setPrioritizedAmbulanceId(null);
+          triggeringReqIdRef.current = null;
         }
 
         return nextState;
@@ -279,93 +325,317 @@ export default function App() {
     return () => clearInterval(timer);
   }, [mode, isPaused, simSpeed, addLog]);
 
-  // Handler Panggil Ambulans (Hanya di mode Simulasi)
-  const handleCallAmbulance = useCallback((direction) => {
-    if (activeAmbulance || mode !== 'simulasi') return;
+  // Jalankan pipeline prioritas FSM untuk ambulans pemenang
+  const activatePriorityForAmbulance = useCallback(
+    (amb, isPreemption = false) => {
+      if (!amb || mode !== 'simulasi') return;
+      const dirInfo = DIRECTION_TO_PHASE[amb.direction];
+      if (!dirInfo) return;
 
-    const dirInfo = DIRECTION_TO_PHASE[direction];
-    if (!dirInfo) return;
+      ambulanceTimersRef.current.forEach(clearTimeout);
+      ambulanceTimersRef.current = [];
+      triggeringReqIdRef.current = amb.requestId;
+      setPrioritizedAmbulanceId(amb.requestId);
 
-    const reqId = `req-${Date.now().toString(36)}`;
-    setActiveAmbulance({
-      direction,
-      requestId: reqId,
-      targetPhase: dirInfo.targetPhase,
-    });
+      const patientLabel = amb.patientType === 'darurat' ? 'DARURAT' : 'NON-DARURAT';
 
-    const t1 = setTimeout(() => {
-      setPipelineStep(1);
-      addLog(
-        'SYS',
-        `[SIMULASI] YOLOv8n mendeteksi ambulans dari arah ${direction} (request_id=${reqId})`
-      );
-    }, (SIMULATION_PARAMS.latencies.detection * 1000) / simSpeed);
+      const t1 = setTimeout(() => {
+        setPipelineStep(1);
+        addLog(
+          'SYS',
+          `[SIMULASI] ${isPreemption ? 'PREEMPSI: ' : ''}YOLOv8n mendeteksi ${amb.label} (${patientLabel}) dari arah ${amb.direction} di jarak ≤${queueDensityInfo.triggerDistanceMeters}m (request_id=${amb.requestId})`
+        );
+      }, (SIMULATION_PARAMS.latencies.detection * 1000) / simSpeed);
 
-    const t2 = setTimeout(() => {
-      setPipelineStep(2);
-      addLog(
-        'SYS',
-        `[SIMULASI] Menulis permintaan prioritas ke Firebase: /commands/${reqId}`
-      );
-    }, (SIMULATION_PARAMS.latencies.firebaseWrite * 1000) / simSpeed);
+      const t2 = setTimeout(() => {
+        setPipelineStep(2);
+        addLog(
+          'SYS',
+          `[SIMULASI] Menulis permintaan prioritas ke Firebase: /commands/${amb.requestId}`
+        );
+      }, (SIMULATION_PARAMS.latencies.firebaseWrite * 1000) / simSpeed);
 
-    const t3 = setTimeout(() => {
-      setPipelineStep(3);
-      addLog(
-        'SYS',
-        `[SIMULASI] Python Backend memvalidasi: Arah ${direction} -> Fase ${dirInfo.targetPhase} (Grup ${dirInfo.targetGroup})`
-      );
-    }, (SIMULATION_PARAMS.latencies.backendValidate * 1000) / simSpeed);
+      const t3 = setTimeout(() => {
+        setPipelineStep(3);
+        addLog(
+          'SYS',
+          `[SIMULASI] Python Backend memvalidasi: ${amb.label} (${patientLabel}) Arah ${amb.direction} -> Fase ${dirInfo.targetPhase} (Grup ${dirInfo.targetGroup})`
+        );
+      }, (SIMULATION_PARAMS.latencies.backendValidate * 1000) / simSpeed);
 
-    const t4 = setTimeout(() => {
-      setPipelineStep(4);
-      addLog(
-        'SET_PHASE',
-        `[SIMULASI] USB-Serial: {"cmd":"SET_PHASE","phase":"${dirInfo.targetPhase}","id":"${reqId}"}`
-      );
-    }, (SIMULATION_PARAMS.latencies.serialSend * 1000) / simSpeed);
+      const t4 = setTimeout(() => {
+        setPipelineStep(4);
+        addLog(
+          'SET_PHASE',
+          `[SIMULASI] USB-Serial: {"cmd":"SET_PHASE","phase":"${dirInfo.targetPhase}","id":"${amb.requestId}"}`
+        );
+      }, (SIMULATION_PARAMS.latencies.serialSend * 1000) / simSpeed);
 
-    const t5 = setTimeout(() => {
-      setPipelineStep(5);
-      addLog(
-        'ACK',
-        `[SIMULASI] ESP32 ACK: {"type":"ACK","id":"${reqId}","cmd":"SET_PHASE","message":"PRIORITY_SET"}`
-      );
-      setFsmState((prev) => triggerEmergencyPriority(prev, direction, reqId));
-    }, (SIMULATION_PARAMS.latencies.ackReceive * 1000) / simSpeed);
+      const t5 = setTimeout(() => {
+        setPipelineStep(5);
+        addLog(
+          'ACK',
+          `[SIMULASI] ESP32 ACK: {"type":"ACK","id":"${amb.requestId}","cmd":"SET_PHASE","message":"PRIORITY_SET"}`
+        );
+        setFsmState((prev) => triggerEmergencyPriority(prev, amb.direction, amb.requestId));
+      }, (SIMULATION_PARAMS.latencies.ackReceive * 1000) / simSpeed);
 
-    ambulanceTimersRef.current = [t1, t2, t3, t4, t5];
-  }, [activeAmbulance, mode, simSpeed, addLog]);
+      ambulanceTimersRef.current = [t1, t2, t3, t4, t5];
+    },
+    [mode, simSpeed, addLog, queueDensityInfo.triggerDistanceMeters]
+  );
 
-  const handleAmbulancePassed = useCallback((reqId) => {
-    addLog(
-      'SYS',
-      `[SIMULASI] Ambulans telah melewati pusat persimpangan. Menahan hijau 2 s lalu rilis.`
-    );
-    setFsmState((prev) => notifyAmbulancePassed(prev));
-  }, [addLog]);
+  // Arbitrase Multi-Ambulans: Darurat selalu didahulukan di atas Non-Darurat, memicu hijau saat jarak <= threshold antrean
+  useEffect(() => {
+    if (mode !== 'simulasi' || isPaused) return;
 
-  const handleCancelAmbulance = useCallback(() => {
-    ambulanceTimersRef.current.forEach(clearTimeout);
-    ambulanceTimersRef.current = [];
+    const triggerMeters = queueDensityInfo.triggerDistanceMeters;
+    const eligible = activeAmbulances
+      .filter((a) => !a.passed && a.distanceToStopLine <= triggerMeters)
+      .sort((a, b) => {
+        if (a.priorityLevel !== b.priorityLevel) {
+          return a.priorityLevel - b.priorityLevel; // 1 (Darurat) < 2 (Non-Darurat)
+        }
+        if (Math.abs(a.distanceToStopLine - b.distanceToStopLine) > 2) {
+          return a.distanceToStopLine - b.distanceToStopLine;
+        }
+        return a.createdAt - b.createdAt;
+      });
 
-    if (activeAmbulance) {
-      addLog(
-        'SYS',
-        `[SIMULASI] Permintaan prioritas ambulans dibatalkan (request_id=${activeAmbulance.requestId})`
-      );
+    if (eligible.length === 0) return;
+
+    const winner = eligible[0];
+    const currentId = prioritizedAmbulanceId || triggeringReqIdRef.current;
+
+    if (!currentId) {
+      activatePriorityForAmbulance(winner, false);
+      return;
     }
 
-    setFsmState((prev) => cancelEmergencyPriority(prev));
-    setActiveAmbulance(null);
-    setPipelineStep(0);
-  }, [activeAmbulance, addLog]);
+    if (currentId !== winner.requestId) {
+      const currentAmb = activeAmbulances.find((a) => a.requestId === currentId);
+      // Preempsi jika ambulans aktif adalah Non-Darurat sementara ada ambulans Darurat masuk zona trigger di fase berbeda
+      if (
+        currentAmb &&
+        !currentAmb.passed &&
+        currentAmb.priorityLevel === 2 &&
+        winner.priorityLevel === 1 &&
+        winner.targetPhase !== currentAmb.targetPhase
+      ) {
+        addLog(
+          'SYS',
+          `[SIMULASI] Prioritas dialihkan ke ${winner.label} (DARURAT, ${winner.direction}) mendahului ${currentAmb.label} (NON-DARURAT, ${currentAmb.direction}).`
+        );
+        activatePriorityForAmbulance(winner, true);
+      }
+    }
+  }, [
+    mode,
+    isPaused,
+    activeAmbulances,
+    prioritizedAmbulanceId,
+    queueDensityInfo.triggerDistanceMeters,
+    activatePriorityForAmbulance,
+    addLog,
+  ]);
+
+  // Handler Panggil Ambulans (Mendukung Multi-Ambulans & Jenis Pasien)
+  const handleCallAmbulance = useCallback(
+    (direction, patientType = 'darurat') => {
+      if (mode !== 'simulasi') return;
+      const alreadyInDirection = activeAmbulances.some(
+        (a) => a.direction === direction && !a.passed
+      );
+      if (alreadyInDirection) return;
+
+      const dirInfo = DIRECTION_TO_PHASE[direction];
+      if (!dirInfo) return;
+
+      ambCounterRef.current += 1;
+      const label = `AMB-${ambCounterRef.current}`;
+      const reqId = `req-${Date.now().toString(36)}-${ambCounterRef.current}`;
+      const priorityLevel = patientType === 'darurat' ? 1 : 2;
+      const patientLabel = patientType === 'darurat' ? 'DARURAT' : 'NON-DARURAT';
+
+      const newAmb = {
+        requestId: reqId,
+        label,
+        direction,
+        patientType,
+        priorityLevel,
+        targetPhase: dirInfo.targetPhase,
+        distanceToStopLine: AMBULANCE_SPAWN_DISTANCE_METERS,
+        distanceTraveled: 0,
+        currentSpeedKmh: AMBULANCE_SPEED_KMH,
+        passed: false,
+        createdAt: Date.now(),
+      };
+
+      setActiveAmbulances((prev) => [...prev, newAmb]);
+      addLog(
+        'SYS',
+        `[SIMULASI] ${label} (${patientLabel}) meluncur dari arah ${direction} (${AMBULANCE_SPEED_KMH} km/jam, jarak awal ${AMBULANCE_SPAWN_DISTANCE_METERS} m, trigger hijau: ${queueDensityInfo.triggerDistanceMeters} m).`
+      );
+    },
+    [mode, activeAmbulances, addLog, queueDensityInfo.triggerDistanceMeters]
+  );
+
+  // Skenario cepat Multi-Ambulans (3 arah sekaligus: Darurat & Non-Darurat)
+  const handleSpawnMultiScenario = useCallback(() => {
+    if (mode !== 'simulasi') return;
+    const scenarioList = [
+      { direction: 'Timur', patientType: 'non-darurat' },
+      { direction: 'Utara', patientType: 'darurat' },
+      { direction: 'Barat', patientType: 'non-darurat' },
+    ];
+
+    const toAdd = [];
+    scenarioList.forEach((item) => {
+      const exists = activeAmbulances.some(
+        (a) => a.direction === item.direction && !a.passed
+      );
+      if (!exists) {
+        const dirInfo = DIRECTION_TO_PHASE[item.direction];
+        ambCounterRef.current += 1;
+        const label = `AMB-${ambCounterRef.current}`;
+        const reqId = `req-${Date.now().toString(36)}-${ambCounterRef.current}`;
+        toAdd.push({
+          requestId: reqId,
+          label,
+          direction: item.direction,
+          patientType: item.patientType,
+          priorityLevel: item.patientType === 'darurat' ? 1 : 2,
+          targetPhase: dirInfo.targetPhase,
+          distanceToStopLine: AMBULANCE_SPAWN_DISTANCE_METERS,
+          distanceTraveled: 0,
+          currentSpeedKmh: AMBULANCE_SPEED_KMH,
+          passed: false,
+          createdAt: Date.now() + ambCounterRef.current,
+        });
+      }
+    });
+
+    if (toAdd.length > 0) {
+      setActiveAmbulances((prev) => [...prev, ...toAdd]);
+      addLog(
+        'SYS',
+        `[SIMULASI] Skenario Multi-Ambulans aktif (${toAdd.length} unit: ${toAdd
+          .map((a) => `${a.label} ${a.direction} [${a.patientType === 'darurat' ? 'DARURAT' : 'NON-DARURAT'}]`)
+          .join(', ')}).`
+      );
+    }
+  }, [mode, activeAmbulances, addLog]);
+
+  const handleAmbulancePassed = useCallback(
+    (reqId) => {
+      let passedAmb = null;
+      let hasAnotherSamePhase = false;
+
+      setActiveAmbulances((prev) => {
+        passedAmb = prev.find((a) => a.requestId === reqId);
+        const updated = prev.map((a) =>
+          a.requestId === reqId ? { ...a, passed: true } : a
+        );
+        if (passedAmb) {
+          hasAnotherSamePhase = updated.some(
+            (a) =>
+              !a.passed &&
+              a.requestId !== reqId &&
+              a.targetPhase === passedAmb.targetPhase &&
+              a.distanceToStopLine <= queueDensityInfo.triggerDistanceMeters
+          );
+        }
+        return updated;
+      });
+
+      if (reqId === (prioritizedAmbulanceId || triggeringReqIdRef.current)) {
+        if (!hasAnotherSamePhase) {
+          addLog(
+            'SYS',
+            `[SIMULASI] Ambulans prioritas telah melewati pusat persimpangan. Menahan hijau 2 s lalu rilis.`
+          );
+          setFsmState((prev) => notifyAmbulancePassed(prev));
+        }
+      }
+    },
+    [addLog, prioritizedAmbulanceId, queueDensityInfo.triggerDistanceMeters]
+  );
+
+  const handleAmbulanceTelemetry = useCallback((telemetryList) => {
+    setActiveAmbulances((prev) =>
+      prev.map((amb) => {
+        const t = telemetryList.find((item) => item.requestId === amb.requestId);
+        if (!t) return amb;
+        return {
+          ...amb,
+          distanceToStopLine: t.distanceToStopLine,
+          distanceTraveled: t.distanceTraveled,
+          currentSpeedKmh: t.currentSpeedKmh,
+          passed: t.passed,
+        };
+      })
+    );
+  }, []);
+
+  const handleFiveMeterCheckpoint = useCallback((record) => {
+    setMovementLogs((prev) => [record, ...prev.slice(0, 199)]);
+  }, []);
+
+  const handleAmbulanceExited = useCallback((reqId) => {
+    setActiveAmbulances((prev) => prev.filter((a) => a.requestId !== reqId));
+  }, []);
+
+  const handleCancelAmbulance = useCallback(
+    (reqId = null) => {
+      if (reqId) {
+        const target = activeAmbulances.find((a) => a.requestId === reqId);
+        setActiveAmbulances((prev) => prev.filter((a) => a.requestId !== reqId));
+        if (target) {
+          addLog(
+            'SYS',
+            `[SIMULASI] ${target.label} (${target.direction}) dibatalkan (request_id=${reqId}).`
+          );
+        }
+        if (reqId === (prioritizedAmbulanceId || triggeringReqIdRef.current)) {
+          ambulanceTimersRef.current.forEach(clearTimeout);
+          ambulanceTimersRef.current = [];
+          triggeringReqIdRef.current = null;
+          setPrioritizedAmbulanceId(null);
+          setFsmState((prev) => cancelEmergencyPriority(prev));
+          setPipelineStep(0);
+        }
+        return;
+      }
+
+      // Batalkan semua ambulans
+      ambulanceTimersRef.current.forEach(clearTimeout);
+      ambulanceTimersRef.current = [];
+      triggeringReqIdRef.current = null;
+
+      if (activeAmbulances.length > 0) {
+        addLog(
+          'SYS',
+          `[SIMULASI] Semua panggilan ambulans (${activeAmbulances.length} unit) dibatalkan.`
+        );
+      }
+
+      setFsmState((prev) => cancelEmergencyPriority(prev));
+      setActiveAmbulances([]);
+      setPrioritizedAmbulanceId(null);
+      setPipelineStep(0);
+    },
+    [activeAmbulances, prioritizedAmbulanceId, addLog]
+  );
 
   const handleResetSimulation = useCallback(() => {
     ambulanceTimersRef.current.forEach(clearTimeout);
     ambulanceTimersRef.current = [];
-    setActiveAmbulance(null);
+    triggeringReqIdRef.current = null;
+    setActiveAmbulances([]);
+    setPrioritizedAmbulanceId(null);
     setPipelineStep(0);
+    setMovementLogs([]);
+    setQueueCount(0);
     const initial = createInitialFSMState();
     prevStateCodeRef.current = initial.stateCode;
     setFsmState(initial);
@@ -498,17 +768,29 @@ export default function App() {
                 liveEsp32Status={liveEsp32Status}
                 simSpeed={simSpeed}
                 isPaused={isPaused}
-                activeAmbulance={mode === 'simulasi' ? activeAmbulance : null}
+                activeAmbulances={mode === 'simulasi' ? activeAmbulances : []}
+                prioritizedAmbulanceId={mode === 'simulasi' ? prioritizedAmbulanceId : null}
+                queueCount={effectiveQueueCount}
+                rawQueueCount={queueCount}
+                queueDensityInfo={queueDensityInfo}
+                queueOverride={queueOverride}
+                onQueueOverrideChange={setQueueOverride}
+                onQueueCountChange={setQueueCount}
                 onCallAmbulance={handleCallAmbulance}
+                onSpawnMultiScenario={handleSpawnMultiScenario}
                 onCancelAmbulance={handleCancelAmbulance}
                 onAmbulancePassed={handleAmbulancePassed}
+                onAmbulanceTelemetry={handleAmbulanceTelemetry}
+                onFiveMeterCheckpoint={handleFiveMeterCheckpoint}
+                onAmbulanceExited={handleAmbulanceExited}
+                movementLogs={movementLogs}
+                onClearMovementLogs={() => setMovementLogs([])}
                 onSpeedChange={(spd) => setSimSpeed(spd)}
                 onTogglePause={() => setIsPaused((p) => !p)}
                 onReset={handleResetSimulation}
               />
               <MapView
-                ambulancePosition={mode === 'simulasi' ? getSimulatedGpsPosition(activeAmbulance) : null}
-                activeDirection={mode === 'simulasi' ? activeAmbulance?.direction : null}
+                ambulances={mode === 'simulasi' ? getSimulatedGpsPositions(activeAmbulances) : []}
               />
               <LogPanel
                 logs={logs}
@@ -541,7 +823,7 @@ export default function App() {
               />
               <PipelineBar
                 activeStep={pipelineStep}
-                isPriorityActive={mode === 'simulasi' && !!activeAmbulance}
+                isPriorityActive={mode === 'simulasi' && activeAmbulances.length > 0 && !!prioritizedAmbulanceId}
                 mode={mode}
               />
             </div>

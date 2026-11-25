@@ -34,7 +34,12 @@ function createIntersectionIcon() {
   });
 }
 
-function createAmbulanceIcon(direction) {
+function createAmbulanceIcon(patientType = 'darurat') {
+  const isDarurat = patientType === 'darurat';
+  const bgColor = isDarurat ? '#EF4444' : '#F59E0B';
+  const ringColor = isDarurat ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.35)';
+  const shadowColor = isDarurat ? 'rgba(239, 68, 68, 0.8)' : 'rgba(245, 158, 11, 0.7)';
+
   return L.divIcon({
     className: 'custom-ambulance-pin',
     html: `
@@ -50,17 +55,17 @@ function createAmbulanceIcon(direction) {
           position: absolute;
           inset: 0;
           border-radius: 50%;
-          background: rgba(239, 68, 68, 0.4);
-          animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+          background: ${ringColor};
+          animation: ping ${isDarurat ? '1.2s' : '2.2s'} cubic-bezier(0, 0, 0.2, 1) infinite;
         "></span>
         <div style="
           position: relative;
-          background: #EF4444;
+          background: ${bgColor};
           width: 32px;
           height: 32px;
           border-radius: 50%;
           border: 2.5px solid #FFFFFF;
-          box-shadow: 0 0 12px rgba(239, 68, 68, 0.8);
+          box-shadow: 0 0 12px ${shadowColor};
           display: flex;
           align-items: center;
           justify-content: center;
@@ -80,7 +85,7 @@ function createAmbulanceIcon(direction) {
 /**
  * MapView
  * Menampilkan peta OpenStreetMap (react-leaflet) untuk kawasan persimpangan Rawamangun
- * beserta marker persimpangan dan marker ambulans.
+ * beserta marker persimpangan dan marker multi-ambulans.
  *
  * Catatan penting:
  * - Belum ada sumber data GPS nyata: tidak membuat listener Firebase untuk posisi ambulans.
@@ -90,6 +95,7 @@ function createAmbulanceIcon(direction) {
 export default function MapView({
   ambulancePosition = null,
   activeDirection = null,
+  ambulances = [],
 }) {
   const center = useMemo(
     () => [MAP_CONFIG.latitude, MAP_CONFIG.longitude],
@@ -97,25 +103,47 @@ export default function MapView({
   );
 
   const intersectionIcon = useMemo(() => createIntersectionIcon(), []);
-  const ambulanceIcon = useMemo(
-    () => createAmbulanceIcon(ambulancePosition?.direction || activeDirection),
-    [ambulancePosition, activeDirection]
-  );
+  const daruratIcon = useMemo(() => createAmbulanceIcon('darurat'), []);
+  const nonDaruratIcon = useMemo(() => createAmbulanceIcon('non-darurat'), []);
 
-  // Normalisasi posisi ambulans dari props (array [lat, lng] atau objek { lat, lng })
-  const ambCoords = useMemo(() => {
-    if (!ambulancePosition) return null;
-    if (Array.isArray(ambulancePosition) && ambulancePosition.length === 2) {
-      return ambulancePosition;
+  // Normalisasi daftar ambulans dari props
+  const normalizedAmbulances = useMemo(() => {
+    if (Array.isArray(ambulances) && ambulances.length > 0) {
+      return ambulances.filter(
+        (a) => typeof a.lat === 'number' && typeof a.lng === 'number'
+      );
     }
-    if (
-      typeof ambulancePosition.lat === 'number' &&
-      typeof ambulancePosition.lng === 'number'
-    ) {
-      return [ambulancePosition.lat, ambulancePosition.lng];
+    if (ambulancePosition) {
+      if (Array.isArray(ambulancePosition) && ambulancePosition.length === 2) {
+        return [
+          {
+            requestId: 'single',
+            label: 'AMB-1',
+            lat: ambulancePosition[0],
+            lng: ambulancePosition[1],
+            direction: activeDirection,
+            patientType: 'darurat',
+          },
+        ];
+      }
+      if (
+        typeof ambulancePosition.lat === 'number' &&
+        typeof ambulancePosition.lng === 'number'
+      ) {
+        return [
+          {
+            requestId: 'single',
+            label: 'AMB-1',
+            lat: ambulancePosition.lat,
+            lng: ambulancePosition.lng,
+            direction: ambulancePosition.direction || activeDirection,
+            patientType: ambulancePosition.patientType || 'darurat',
+          },
+        ];
+      }
     }
-    return null;
-  }, [ambulancePosition]);
+    return [];
+  }, [ambulances, ambulancePosition, activeDirection]);
 
   return (
     <div className="rounded-xl border border-border-line bg-surface p-4 shadow-xs flex flex-col">
@@ -130,9 +158,9 @@ export default function MapView({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {ambCoords ? (
+          {normalizedAmbulances.length > 0 ? (
             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-error text-white animate-pulse">
-              Ambulans Terdeteksi (GPS Pendukung)
+              {normalizedAmbulances.length} Ambulans Terdeteksi (GPS Pendukung)
             </span>
           ) : (
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-surface-2 text-text-muted">
@@ -190,28 +218,40 @@ export default function MapView({
             </Popup>
           </Marker>
 
-          {/* Marker Ambulans dari Props (divIcon) */}
-          {ambCoords && (
-            <Marker position={ambCoords} icon={ambulanceIcon}>
-              <Popup>
-                <div className="text-xs p-1 text-slate-800">
-                  <div className="font-bold text-red-600 flex items-center gap-1">
-                    <span>🚑</span> Posisi Ambulans (GPS Pendukung)
+          {/* Marker Multi-Ambulans dari Props (divIcon) */}
+          {normalizedAmbulances.map((amb) => {
+            const isDarurat = amb.patientType !== 'non-darurat';
+            return (
+              <Marker
+                key={amb.requestId || `${amb.direction}-${amb.label}`}
+                position={[amb.lat, amb.lng]}
+                icon={isDarurat ? daruratIcon : nonDaruratIcon}
+              >
+                <Popup>
+                  <div className="text-xs p-1 text-slate-800">
+                    <div className={`font-bold flex items-center gap-1 ${isDarurat ? 'text-red-600' : 'text-amber-600'}`}>
+                      <span>🚑</span> {amb.label || 'Ambulans'} ({isDarurat ? 'DARURAT' : 'NON-DARURAT'})
+                    </div>
+                    <div className="text-[11px] text-slate-700 mt-0.5">
+                      Arah kedatangan:{' '}
+                      <strong>{amb.direction || 'Dipilih Pengguna'}</strong>
+                    </div>
+                    {typeof amb.distanceToStopLine === 'number' && (
+                      <div className="text-[11px] text-slate-700">
+                        Jarak ke garis henti: <strong>{amb.distanceToStopLine.toFixed(1)} m</strong> (40 km/jam)
+                      </div>
+                    )}
+                    <div className="font-mono text-[10px] text-slate-500 mt-1">
+                      Lat: {amb.lat.toFixed(5)}°, Lng: {amb.lng.toFixed(5)}°
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-1 border-t border-slate-200 pt-1">
+                      Catatan: Arah tetap ditentukan oleh pilihan pengguna.
+                    </div>
                   </div>
-                  <div className="text-[11px] text-slate-700 mt-0.5">
-                    Arah kedatangan:{' '}
-                    <strong>{ambulancePosition?.direction || activeDirection || 'Dipilih Pengguna'}</strong>
-                  </div>
-                  <div className="font-mono text-[10px] text-slate-500 mt-1">
-                    Lat: {ambCoords[0].toFixed(5)}°, Lng: {ambCoords[1].toFixed(5)}°
-                  </div>
-                  <div className="text-[10px] text-slate-500 mt-1 border-t border-slate-200 pt-1">
-                    Catatan: Arah tetap ditentukan oleh pilihan pengguna.
-                  </div>
-                </div>
-              </Popup>
-            </Marker>
-          )}
+                </Popup>
+              </Marker>
+            );
+          })}
         </MapContainer>
       </div>
 

@@ -290,11 +290,80 @@ export const MAP_CONFIG = {
 };
 
 /**
- * Parameter Simulasi (PRD bagian 10)
+ * Parameter Simulasi (PRD bagian 10) & Konfigurasi Ambulans
  */
+export const AMBULANCE_SPEED_KMH = 40; // Kecepatan standar ambulans (40 km/jam)
+export const AMBULANCE_SPEED_MPS = AMBULANCE_SPEED_KMH / 3.6; // ~11.111 m/s
+export const PIXELS_PER_METER = 1.5; // Skala kanvas: 1.5 px = 1 meter (150 m = 225 px)
+export const AMBULANCE_SPAWN_DISTANCE_METERS = 155; // Jarak awal ambulans sebelum garis henti (m)
+
+/**
+ * Klasifikasi kepadatan antrean & jarak trigger lampu hijau ambulans
+ * - Rendah (<= 5 kendaraan): lampu hijau di 50 m
+ * - Sedang (6..15 kendaraan): lampu hijau di 100 m
+ * - Tinggi (> 15 kendaraan): lampu hijau di 150 m
+ */
+export const QUEUE_DENSITY_LEVELS = {
+  RENDAH: {
+    id: 'rendah',
+    label: 'Rendah',
+    rule: '≤ 5 kendaraan',
+    maxCount: 5,
+    triggerDistanceMeters: 50,
+    color: '#22C55E',
+  },
+  SEDANG: {
+    id: 'sedang',
+    label: 'Sedang',
+    rule: '6–15 kendaraan',
+    maxCount: 15,
+    triggerDistanceMeters: 100,
+    color: '#F59E0B',
+  },
+  TINGGI: {
+    id: 'tinggi',
+    label: 'Tinggi',
+    rule: '> 15 kendaraan',
+    maxCount: Infinity,
+    triggerDistanceMeters: 150,
+    color: '#EF4444',
+  },
+};
+
+/**
+ * Menentukan tingkat kepadatan antrean & jarak trigger lampu hijau berdasarkan jumlah antrean
+ */
+export function getQueueDensityInfo(queueCount = 0) {
+  if (queueCount <= QUEUE_DENSITY_LEVELS.RENDAH.maxCount) {
+    return QUEUE_DENSITY_LEVELS.RENDAH;
+  }
+  if (queueCount <= QUEUE_DENSITY_LEVELS.SEDANG.maxCount) {
+    return QUEUE_DENSITY_LEVELS.SEDANG;
+  }
+  return QUEUE_DENSITY_LEVELS.TINGGI;
+}
+
+/**
+ * Jenis pasien ambulans untuk penentuan prioritas skenario multi-ambulans
+ */
+export const PATIENT_TYPES = {
+  DARURAT: {
+    id: 'darurat',
+    label: 'Darurat',
+    priority: 1,
+    description: 'Pasien gawat darurat (prioritas utama)',
+  },
+  NON_DARURAT: {
+    id: 'non-darurat',
+    label: 'Non-Darurat',
+    priority: 2,
+    description: 'Pasien tidak darurat / rujukan biasa (prioritas sekunder)',
+  },
+};
+
 export const SIMULATION_PARAMS = {
   vehicleSpeed: 70,           // px/s
-  ambulanceSpeed: 55,         // px/s
+  ambulanceSpeed: AMBULANCE_SPEED_MPS * PIXELS_PER_METER, // 40 km/jam -> ~16.67 px/s
   spawnRates: {
     Baseline: 0.07,           // kendaraan/detik per lajur
     Pagi: 0.16,
