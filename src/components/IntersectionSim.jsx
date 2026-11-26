@@ -32,27 +32,19 @@ export default function IntersectionSim({
   liveEsp32Status = null,
   simSpeed = 1,
   isPaused = false,
+  trafficScenario = 'Baseline',
+  resetVersion = 0,
   activeAmbulances = [],
   prioritizedAmbulanceId = null,
   queueCount = 0,
-  rawQueueCount = 0,
   queueDensityInfo = QUEUE_DENSITY_LEVELS.RENDAH,
-  queueOverride = 'auto',
-  onQueueOverrideChange,
   onQueueCountChange,
-  onCallAmbulance,
-  onSpawnMultiScenario,
-  onCancelAmbulance,
   onAmbulancePassed,
   onAmbulanceTelemetry,
   onFiveMeterCheckpoint,
   onAmbulanceExited,
-  movementLogs = [],
-  onClearMovementLogs,
   onVehiclePassed,
-  onSpeedChange,
-  onTogglePause,
-  onReset,
+  onOpenControlPanel,
 }) {
   const canvasRef = useRef(null);
 
@@ -62,8 +54,15 @@ export default function IntersectionSim({
   const ambulancesRef = useRef([]);
   const lastTelemetrySyncRef = useRef(0);
   const lastReportedQueueRef = useRef(-1);
-  const [trafficScenario, setTrafficScenario] = useState('Baseline');
-  const [selectedPatientType, setSelectedPatientType] = useState('darurat');
+
+  // Reset kendaraan dan ambulans saat resetVersion bertambah dari Panel Kontrol
+  useEffect(() => {
+    if (resetVersion > 0) {
+      vehiclesRef.current = [];
+      ambulancesRef.current = [];
+      lastReportedQueueRef.current = -1;
+    }
+  }, [resetVersion]);
 
   // Ref untuk menyimpan props terbaru agar canvas animation loop selalu membaca data ter-update
   const propsRef = useRef({});
@@ -156,14 +155,6 @@ export default function IntersectionSim({
     }
   }, [activeAmbulances]);
 
-  // Handle reset
-  const handleReset = useCallback(() => {
-    vehiclesRef.current = [];
-    ambulancesRef.current = [];
-    lastReportedQueueRef.current = -1;
-    if (onReset) onReset();
-  }, [onReset]);
-
   // Main canvas animation loop
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -204,7 +195,12 @@ export default function IntersectionSim({
 
   // Update posisi kendaraan & multi-ambulans
   const updateSimulation = (dt, nowMs = performance.now()) => {
-    const { mode: currentMode, liveEsp32Status: currentEsp32, fsmState: currentFsm } = propsRef.current;
+    const {
+      mode: currentMode,
+      liveEsp32Status: currentEsp32,
+      fsmState: currentFsm,
+      trafficScenario: currentScenario,
+    } = propsRef.current;
     const currentStateCode =
       currentMode === 'terhubung'
         ? currentEsp32?.state || 'UNKNOWN'
@@ -212,7 +208,7 @@ export default function IntersectionSim({
           ? currentFsm.stateCode
           : 'STARTUP_ALL_RED';
     const lampColors = getLampColors(currentStateCode);
-    const spawnRate = SIMULATION_PARAMS.spawnRates[trafficScenario] || 0.07;
+    const spawnRate = SIMULATION_PARAMS.spawnRates[currentScenario] || 0.18;
 
     // Spawn kendaraan acak
     lastSpawnTimeRef.current += dt;
@@ -992,334 +988,43 @@ export default function IntersectionSim({
         />
       </div>
 
-      {/* Kontrol Simulasi & Tombol Arah Ambulans */}
-      <div className="mt-4 pt-3 border-t border-border-line flex flex-col gap-3">
-        {/* Kontrol Kecepatan, Jeda, Skenario */}
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-1.5">
-            <span className="text-text-muted text-[11px] font-medium">Kecepatan:</span>
-            {[1, 2, 4].map((spd) => (
-              <button
-                key={spd}
-                type="button"
-                onClick={() => onSpeedChange && onSpeedChange(spd)}
-                className={`px-2.5 py-1 rounded-md text-xs font-bold transition-all ${simSpeed === spd
-                    ? 'bg-accent text-surface shadow-xs'
-                    : 'bg-surface-2 text-text-muted hover:text-text-main'
-                  }`}
+      {/* Ringkasan Status & Tombol ke Panel Kontrol */}
+      <div className="mt-4 pt-3 border-t border-border-line flex flex-wrap items-center justify-between gap-2.5">
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="px-2.5 py-1 rounded-full bg-accent/15 text-accent border border-accent/30 font-semibold">
+            Kecepatan {simSpeed}×{isPaused ? ' (Jeda)' : ''}
+          </span>
+          <span className="px-2.5 py-1 rounded-full bg-surface-2 text-text-muted border border-border-line font-medium">
+            Beban: {trafficScenario}
+          </span>
+          {mode === 'simulasi' && (
+            <>
+              <span
+                className={`px-2.5 py-1 rounded-full border font-semibold ${
+                  queueDensityInfo.id === 'rendah'
+                    ? 'bg-success/10 text-success border-success/40'
+                    : queueDensityInfo.id === 'sedang'
+                      ? 'bg-warning/10 text-warning border-warning/40'
+                      : 'bg-error/10 text-error border-error/40'
+                }`}
               >
-                {spd}×
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <label className="text-text-muted text-[11px]">Beban:</label>
-            <select
-              value={trafficScenario}
-              onChange={(e) => setTrafficScenario(e.target.value)}
-              className="text-xs rounded-md bg-surface-2 border border-border-line px-2 py-1 text-text-main outline-hidden"
-            >
-              <option value="Baseline">Baseline</option>
-              <option value="Pagi">Pagi (Padat)</option>
-              <option value="Siang">Siang</option>
-              <option value="Sore">Sore (Padat)</option>
-            </select>
-            <button
-              type="button"
-              onClick={onTogglePause}
-              className="px-3 py-1 rounded-lg bg-surface-2 text-text-main text-xs font-semibold hover:bg-surface-2/80 transition-colors"
-            >
-              {isPaused ? '▶ Lanjut' : '⏸ Jeda'}
-            </button>
-            <button
-              type="button"
-              onClick={handleReset}
-              className="px-3 py-1 rounded-lg bg-surface-2 text-text-muted text-xs font-semibold hover:text-text-main transition-colors"
-            >
-              Reset
-            </button>
-          </div>
+                Antrean: {queueDensityInfo.label.toUpperCase()} ({queueCount} kend.)
+              </span>
+              <span className="px-2.5 py-1 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/40 font-semibold">
+                Hijau {queueDensityInfo.triggerDistanceMeters} m
+              </span>
+            </>
+          )}
         </div>
 
-        {/* Panel Status Antrean & Jarak Trigger Lampu Hijau (50m / 100m / 150m) */}
-        {mode === 'simulasi' && (
-          <div className="rounded-lg bg-surface-2 p-3 border border-border-line flex flex-col gap-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-bold text-text-main">
-                  Kepadatan Antrean:
-                </span>
-                <span
-                  className="text-[11px] font-bold px-2 py-0.5 rounded-full text-slate-950"
-                  style={{ backgroundColor: queueDensityInfo.color }}
-                >
-                  {queueDensityInfo.label.toUpperCase()} ({queueCount} kend.)
-                </span>
-                <span className="text-[11px] font-mono font-bold text-accent">
-                  → Lampu Hijau di {queueDensityInfo.triggerDistanceMeters} m
-                </span>
-              </div>
-
-              <div className="flex items-center gap-1.5 text-[11px]">
-                <label className="text-text-muted">Deteksi Antrean:</label>
-                <select
-                  value={queueOverride}
-                  onChange={(e) => onQueueOverrideChange && onQueueOverrideChange(e.target.value)}
-                  className="text-[11px] rounded-md bg-surface border border-border-line px-2 py-0.5 text-text-main outline-hidden"
-                >
-                  <option value="auto">Otomatis ({rawQueueCount} di canvas)</option>
-                  <option value="rendah">Simulasi Rendah (≤ 5 · 50 m)</option>
-                  <option value="sedang">Simulasi Sedang (≤ 15 · 100 m)</option>
-                  <option value="tinggi">Simulasi Tinggi (&gt; 15 · 150 m)</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-1.5 text-[10px]">
-              {[
-                { key: 'rendah', label: 'Rendah (≤ 5)', dist: '50 m', color: 'border-success/50 text-success bg-success/10' },
-                { key: 'sedang', label: 'Sedang (≤ 15)', dist: '100 m', color: 'border-warning/50 text-warning bg-warning/10' },
-                { key: 'tinggi', label: 'Tinggi (> 15)', dist: '150 m', color: 'border-error/50 text-error bg-error/10' },
-              ].map((tier) => {
-                const isActive = queueDensityInfo.id === tier.key;
-                return (
-                  <div
-                    key={tier.key}
-                    className={`px-2 py-1 rounded border text-center font-medium transition-all ${
-                      isActive ? `${tier.color} font-bold ring-1 ring-current` : 'border-border-line bg-surface text-text-muted opacity-70'
-                    }`}
-                  >
-                    {tier.label} → Hijau {tier.dist}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Panel Multi-Ambulans & Prioritas Pasien (Hanya Mode Simulasi) */}
-        {mode === 'simulasi' && (
-          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-              <span className="text-xs font-bold text-text-main flex items-center gap-1.5">
-                <span>🚑</span> Skenario Multi-Ambulans (simulasi · {AMBULANCE_SPEED_KMH} km/jam)
-              </span>
-              <button
-                type="button"
-                onClick={onSpawnMultiScenario}
-                className="px-2.5 py-1 rounded-md bg-accent/15 border border-accent/40 text-accent hover:bg-accent/25 text-[11px] font-bold transition-colors cursor-pointer"
-              >
-                ⚡ Simulasi Multi-Ambulans (3 Arah)
-              </button>
-            </div>
-
-            {/* Pilihan Jenis Pasien */}
-            <div className="flex flex-wrap items-center gap-2 mb-2.5 text-xs">
-              <span className="text-[11px] text-text-muted font-medium">Jenis Pasien:</span>
-              <button
-                type="button"
-                onClick={() => setSelectedPatientType('darurat')}
-                className={`px-2.5 py-1 rounded-md border text-[11px] font-bold transition-all cursor-pointer ${
-                  selectedPatientType === 'darurat'
-                    ? 'bg-error text-white border-error shadow-xs'
-                    : 'bg-surface border-border-line text-text-muted hover:text-text-main'
-                }`}
-              >
-                🚨 Darurat (Prioritas Utama)
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedPatientType('non-darurat')}
-                className={`px-2.5 py-1 rounded-md border text-[11px] font-bold transition-all cursor-pointer ${
-                  selectedPatientType === 'non-darurat'
-                    ? 'bg-amber-500 text-slate-950 border-amber-500 shadow-xs'
-                    : 'bg-surface border-border-line text-text-muted hover:text-text-main'
-                }`}
-              >
-                🏥 Non-Darurat (Sekunder)
-              </button>
-            </div>
-
-            {/* Tombol Arah Kedatangan (Bisa panggil > 1 ambulans dari arah berbeda) */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-              {['Utara', 'Selatan', 'Timur', 'Barat'].map((dir) => {
-                const info = DIRECTION_TO_PHASE[dir];
-                const activeInDir = activeAmbulances.find(
-                  (a) => a.direction === dir && !a.passed
-                );
-
-                return (
-                  <button
-                    key={dir}
-                    type="button"
-                    disabled={!!activeInDir}
-                    onClick={() =>
-                      onCallAmbulance && onCallAmbulance(dir, selectedPatientType)
-                    }
-                    className={`p-2 rounded-lg border text-center transition-all ${
-                      activeInDir
-                        ? activeInDir.patientType === 'darurat'
-                          ? 'border-error bg-error/20 text-error font-bold cursor-not-allowed'
-                          : 'border-amber-500 bg-amber-500/20 text-amber-400 font-bold cursor-not-allowed'
-                        : 'border-border-line bg-surface hover:border-accent hover:text-accent font-medium cursor-pointer'
-                    }`}
-                  >
-                    <div className="font-bold">{dir}</div>
-                    <div className="text-[10px] text-text-muted truncate">
-                      {activeInDir
-                        ? `${activeInDir.label} (${activeInDir.patientType === 'darurat' ? 'Darurat' : 'Non-Darurat'})`
-                        : `${info.lane} → Fase ${info.targetPhase}`}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Daftar Ambulans Aktif & Status Prioritas */}
-            {activeAmbulances.length > 0 && (
-              <div className="mt-3 pt-2.5 border-t border-border-line flex flex-col gap-1.5">
-                <div className="flex items-center justify-between text-[11px] mb-0.5">
-                  <span className="font-bold text-text-main">
-                    Ambulans Aktif ({activeAmbulances.length} unit)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onCancelAmbulance && onCancelAmbulance(null)}
-                    className="px-2 py-0.5 rounded bg-error/10 border border-error/40 text-error hover:bg-error/20 text-[10px] font-bold transition-colors cursor-pointer"
-                  >
-                    Batalkan Semua
-                  </button>
-                </div>
-
-                {activeAmbulances.map((amb) => {
-                  const isDarurat = amb.patientType === 'darurat';
-                  const isPrioritized = amb.requestId === prioritizedAmbulanceId;
-                  return (
-                    <div
-                      key={amb.requestId}
-                      className={`flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-md border text-[11px] ${
-                        isPrioritized
-                          ? 'border-error/60 bg-error/10'
-                          : 'border-border-line bg-surface'
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-mono font-bold text-text-main">
-                          {amb.label}
-                        </span>
-                        <span className="text-text-muted">· {amb.direction}</span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                            isDarurat
-                              ? 'bg-error text-white'
-                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
-                          }`}
-                        >
-                          {isDarurat ? 'DARURAT' : 'NON-DARURAT'}
-                        </span>
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                            amb.passed
-                              ? 'bg-success/20 text-success'
-                              : isPrioritized
-                                ? 'bg-accent/20 text-accent animate-pulse'
-                                : 'bg-surface-2 text-text-muted'
-                          }`}
-                        >
-                          {amb.passed
-                            ? 'MELINTAS'
-                            : isPrioritized
-                              ? 'DIPRIORITASKAN'
-                              : 'MENUNGGU'}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2 font-mono text-[10px]">
-                        <span className="text-text-muted">
-                          Sisa: <strong className="text-text-main">{amb.distanceToStopLine.toFixed(1)} m</strong>
-                        </span>
-                        <span className="text-text-muted">
-                          <strong className="text-accent">{amb.currentSpeedKmh} km/jam</strong>
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onCancelAmbulance && onCancelAmbulance(amb.requestId)}
-                          className="text-error hover:underline font-sans font-semibold cursor-pointer"
-                        >
-                          Batal
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Tabel Catatan Pergerakan Ambulans per 5 Meter (40 km/jam) */}
-        {mode === 'simulasi' && (
-          <div className="rounded-lg bg-surface-2 p-3 border border-border-line">
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <span className="text-xs font-bold text-text-main">
-                  ⏱️ Catatan Waktu Perpindahan Ambulans (per 5 Meter)
-                </span>
-                <p className="text-[10px] text-text-muted">
-                  Kecepatan target {AMBULANCE_SPEED_KMH} km/jam (11,11 m/s · ideal 0,45 dtk per 5 m)
-                </p>
-              </div>
-              {movementLogs.length > 0 && onClearMovementLogs && (
-                <button
-                  type="button"
-                  onClick={onClearMovementLogs}
-                  className="text-[10px] text-text-muted hover:text-text-main px-2 py-0.5 rounded bg-surface border border-border-line cursor-pointer"
-                >
-                  Bersihkan
-                </button>
-              )}
-            </div>
-
-            <div className="max-h-40 overflow-y-auto rounded border border-border-line bg-surface">
-              {movementLogs.length === 0 ? (
-                <div className="text-[11px] text-text-muted text-center py-4">
-                  Belum ada catatan pergerakan. Panggil ambulans untuk merekam waktu perpindahan tiap 5 meter.
-                </div>
-              ) : (
-                <table className="w-full text-left font-mono text-[10.5px] border-collapse">
-                  <thead className="sticky top-0 bg-surface-2 text-text-muted border-b border-border-line">
-                    <tr>
-                      <th className="py-1.5 px-2">Unit</th>
-                      <th className="py-1.5 px-2">Segmen</th>
-                      <th className="py-1.5 px-2">Sisa Garis Henti</th>
-                      <th className="py-1.5 px-2">Waktu / 5m</th>
-                      <th className="py-1.5 px-2">Kumulatif</th>
-                      <th className="py-1.5 px-2">Kecepatan</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {movementLogs.map((row) => (
-                      <tr key={row.id} className="border-b border-border-line/50 last:border-0">
-                        <td className="py-1 px-2 font-bold text-text-main">
-                          {row.ambulanceLabel} ({row.direction[0]} ·{' '}
-                          <span className={row.patientType === 'darurat' ? 'text-error' : 'text-amber-400'}>
-                            {row.patientType === 'darurat' ? 'DRT' : 'NON'}
-                          </span>
-                          )
-                        </td>
-                        <td className="py-1 px-2 text-accent">{row.segmentLabel}</td>
-                        <td className="py-1 px-2 text-text-muted">{row.distanceFromStopLine} m</td>
-                        <td className="py-1 px-2 font-bold text-success">{row.deltaSeconds.toFixed(2)} dtk</td>
-                        <td className="py-1 px-2 text-text-muted">{row.cumulativeSeconds.toFixed(2)} dtk</td>
-                        <td className="py-1 px-2 text-text-main">{row.speedKmh} km/jam</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </div>
+        {onOpenControlPanel && (
+          <button
+            type="button"
+            onClick={onOpenControlPanel}
+            className="px-3.5 py-1.5 rounded-lg bg-accent text-slate-950 text-xs font-bold hover:bg-accent-hover transition-colors cursor-pointer shrink-0"
+          >
+            Buka Panel Kontrol →
+          </button>
         )}
       </div>
     </div>
