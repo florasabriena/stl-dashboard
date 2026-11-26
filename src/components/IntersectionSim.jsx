@@ -65,6 +65,19 @@ export default function IntersectionSim({
   const [trafficScenario, setTrafficScenario] = useState('Baseline');
   const [selectedPatientType, setSelectedPatientType] = useState('darurat');
 
+  // Ref untuk menyimpan props terbaru agar canvas animation loop selalu membaca data ter-update
+  const propsRef = useRef({});
+  propsRef.current = {
+    mode,
+    liveEsp32Status,
+    fsmState,
+    isPaused,
+    simSpeed,
+    trafficScenario,
+    queueDensityInfo,
+    prioritizedAmbulanceId,
+  };
+
   // Sinkronisasi daftar multi-ambulans dari props
   useEffect(() => {
     const activeIds = new Set(activeAmbulances.map((a) => a.requestId));
@@ -160,11 +173,12 @@ export default function IntersectionSim({
     let lastTimestamp = performance.now();
 
     const render = (now) => {
-      const dt = Math.min((now - lastTimestamp) / 1000, 0.1) * (isPaused ? 0 : simSpeed);
+      const { isPaused: paused, simSpeed: speed } = propsRef.current;
+      const dt = Math.min((now - lastTimestamp) / 1000, 0.1) * (paused ? 0 : speed);
       lastTimestamp = now;
 
       // Update simulasi kendaraan jika tidak pause
-      if (!isPaused && dt > 0) {
+      if (!paused && dt > 0) {
         updateSimulation(dt, now);
       }
 
@@ -176,7 +190,7 @@ export default function IntersectionSim({
 
     animationFrameId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [fsmState, isPaused, simSpeed, trafficScenario, queueDensityInfo, prioritizedAmbulanceId]);
+  }, []);
 
   // Helper hitung jarak ke garis henti (meter)
   const computeDistanceToStopLineMeters = (amb) => {
@@ -190,11 +204,12 @@ export default function IntersectionSim({
 
   // Update posisi kendaraan & multi-ambulans
   const updateSimulation = (dt, nowMs = performance.now()) => {
+    const { mode: currentMode, liveEsp32Status: currentEsp32, fsmState: currentFsm } = propsRef.current;
     const currentStateCode =
-      mode === 'terhubung'
-        ? liveEsp32Status?.state || 'UNKNOWN'
-        : fsmState
-          ? fsmState.stateCode
+      currentMode === 'terhubung'
+        ? currentEsp32?.state || 'UNKNOWN'
+        : currentFsm
+          ? currentFsm.stateCode
           : 'STARTUP_ALL_RED';
     const lampColors = getLampColors(currentStateCode);
     const spawnRate = SIMULATION_PARAMS.spawnRates[trafficScenario] || 0.07;
@@ -620,11 +635,12 @@ export default function IntersectionSim({
     drawDistanceMarkers(ctx);
 
     // 5. Kepala Lampu TL1 - TL6
+    const { mode: currentMode, liveEsp32Status: currentEsp32, fsmState: currentFsm } = propsRef.current;
     const currentStateCode =
-      mode === 'terhubung'
-        ? liveEsp32Status?.state || 'UNKNOWN'
-        : fsmState
-          ? fsmState.stateCode
+      currentMode === 'terhubung'
+        ? currentEsp32?.state || 'UNKNOWN'
+        : currentFsm
+          ? currentFsm.stateCode
           : 'STARTUP_ALL_RED';
     const lampColors = getLampColors(currentStateCode);
     drawTrafficLights(ctx, lampColors);

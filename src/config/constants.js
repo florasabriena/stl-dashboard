@@ -365,10 +365,10 @@ export const SIMULATION_PARAMS = {
   vehicleSpeed: 70,           // px/s
   ambulanceSpeed: AMBULANCE_SPEED_MPS * PIXELS_PER_METER, // 40 km/jam -> ~16.67 px/s
   spawnRates: {
-    Baseline: 0.07,           // kendaraan/detik per lajur
-    Pagi: 0.16,
-    Siang: 0.11,
-    Sore: 0.15,
+    Baseline: 0.18,           // kendaraan/detik per lajur
+    Pagi: 0.55,
+    Siang: 0.30,
+    Sore: 0.50,
   },
   latencies: {
     detection: 0.6,           // Deteksi (s)
