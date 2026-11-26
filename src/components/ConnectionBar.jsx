@@ -47,7 +47,7 @@ export default function ConnectionBar({
         </span>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
         {/* 1. Indikator Firebase */}
         <div className="rounded-lg bg-surface-2 p-2.5 flex flex-col justify-between border border-border-line">
           <span className="text-text-muted text-[11px] mb-1 font-medium">Firebase RTDB</span>

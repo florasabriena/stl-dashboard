@@ -9,6 +9,7 @@ import IntersectionSim from './components/IntersectionSim';
 import MapView from './components/MapView';
 import LogPanel from './components/LogPanel';
 import Login from './components/Login';
+import ControlPanel from './components/ControlPanel';
 import {
   createInitialFSMState,
   tickFSM,
@@ -85,6 +86,8 @@ const getSimulatedGpsPositions = (ambulances) => {
 export default function App() {
   // Mode: 'simulasi' | 'terhubung'
   const [mode, setMode] = useState('simulasi');
+  // Halaman aktif: 'dasbor' | 'kontrol'
+  const [activeTab, setActiveTab] = useState('dasbor');
   const [showLogin, setShowLogin] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
 
@@ -92,6 +95,8 @@ export default function App() {
   const [fsmState, setFsmState] = useState(() => createInitialFSMState());
   const [simSpeed, setSimSpeed] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
+  const [trafficScenario, setTrafficScenario] = useState('Baseline');
+  const [resetVersion, setResetVersion] = useState(0);
 
   // Status Jalur Data & Multi-Ambulans (Simulasi)
   const [pipelineStep, setPipelineStep] = useState(0);
@@ -636,17 +641,35 @@ export default function App() {
     setPipelineStep(0);
     setMovementLogs([]);
     setQueueCount(0);
+    setResetVersion((v) => v + 1);
     const initial = createInitialFSMState();
     prevStateCodeRef.current = initial.stateCode;
     setFsmState(initial);
     addLog('SYS', '[SIMULASI] Simulasi di-reset ke STARTUP_ALL_RED (3 s).');
   }, [addLog]);
 
+  if (showLogin) {
+    return (
+      <Login
+        isOpen={showLogin}
+        onClose={() => setShowLogin(false)}
+        onSuccess={() => {
+          setShowLogin(false);
+          setMode('terhubung');
+        }}
+        onSwitchToSimulation={() => {
+          setShowLogin(false);
+          setMode('simulasi');
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-app-bg text-text-main transition-colors">
       {/* HEADER */}
       <header className="sticky top-0 z-40 border-b border-border-line bg-surface/90 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           {/* Judul & Tag */}
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-[19px] font-bold tracking-tight text-text-main">
@@ -657,8 +680,34 @@ export default function App() {
             </span>
           </div>
 
-          {/* Saklar Mode, Penanda Mode, dan Tombol Akun */}
-          <div className="flex items-center gap-3">
+          {/* Navigasi Halaman, Saklar Mode, dan Tombol Akun */}
+          <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+            {/* Tab Navigasi Halaman: Dasbor | Panel Kontrol */}
+            <nav className="flex items-center gap-1 text-xs" aria-label="Navigasi Halaman">
+              <button
+                type="button"
+                onClick={() => setActiveTab('dasbor')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+                  activeTab === 'dasbor'
+                    ? 'bg-accent text-slate-950 font-bold shadow-xs'
+                    : 'text-text-muted hover:text-text-main hover:bg-surface-2'
+                }`}
+              >
+                Dasbor
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('kontrol')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+                  activeTab === 'kontrol'
+                    ? 'bg-accent text-slate-950 font-bold shadow-xs'
+                    : 'text-text-muted hover:text-text-main hover:bg-surface-2'
+                }`}
+              >
+                Panel Kontrol
+              </button>
+            </nav>
+
             {mode === 'simulasi' ? (
               <span className="text-xs font-bold px-2.5 py-1 rounded-md bg-accent/15 text-accent border border-accent/30 tracking-wide">
                 MODE SIMULASI
@@ -677,7 +726,7 @@ export default function App() {
                 onClick={() => handleModeChange('simulasi')}
                 className={`px-3 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
                   mode === 'simulasi'
-                    ? 'bg-accent text-surface shadow-xs'
+                    ? 'bg-accent text-slate-950 font-bold shadow-xs'
                     : 'text-text-muted hover:text-text-main'
                 }`}
               >
@@ -688,7 +737,7 @@ export default function App() {
                 onClick={() => handleModeChange('terhubung')}
                 className={`px-3 py-1.5 rounded-md font-semibold transition-all cursor-pointer ${
                   mode === 'terhubung'
-                    ? 'bg-accent text-surface shadow-xs'
+                    ? 'bg-accent text-slate-950 font-bold shadow-xs'
                     : 'text-text-muted hover:text-text-main'
                 }`}
               >
@@ -717,7 +766,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setShowLogin(true)}
-                className="text-xs font-semibold px-2.5 py-1.5 rounded-lg border border-border-line bg-surface-2 hover:bg-surface-2/80 text-text-muted hover:text-text-main transition-colors cursor-pointer"
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-border-line bg-surface-2 hover:bg-surface-2/80 text-text-muted hover:text-text-main transition-colors cursor-pointer"
               >
                 Login
               </button>
@@ -758,92 +807,111 @@ export default function App() {
             </div>
           </div>
         ) : (
-          /* TATA LETAK DUA KOLOM (SATU KOLOM DI HP) */
-          <div className="grid grid-cols-1 min-[881px]:grid-cols-12 gap-6 items-start">
-            {/* KOLOM KIRI (Canvas Persimpangan, MapView, Log) */}
-            <div className="min-[881px]:col-span-7 flex flex-col gap-6">
-              <IntersectionSim
-                fsmState={fsmState}
+          <>
+            {/* HALAMAN UTAMA: DASBOR (tetap ter-mount agar simulasi canvas 60 FPS berjalan mulus saat di Panel Kontrol) */}
+            <div
+              className={`grid grid-cols-1 min-[881px]:grid-cols-12 gap-6 items-start ${
+                activeTab === 'dasbor' ? '' : 'hidden'
+              }`}
+            >
+              {/* KOLOM KIRI (Canvas Persimpangan, MapView, Log) */}
+              <div className="min-[881px]:col-span-7 flex flex-col gap-6">
+                <IntersectionSim
+                  fsmState={fsmState}
+                  mode={mode}
+                  liveEsp32Status={liveEsp32Status}
+                  simSpeed={simSpeed}
+                  isPaused={isPaused}
+                  trafficScenario={trafficScenario}
+                  resetVersion={resetVersion}
+                  activeAmbulances={mode === 'simulasi' ? activeAmbulances : []}
+                  prioritizedAmbulanceId={mode === 'simulasi' ? prioritizedAmbulanceId : null}
+                  queueCount={effectiveQueueCount}
+                  queueDensityInfo={queueDensityInfo}
+                  onQueueCountChange={setQueueCount}
+                  onAmbulancePassed={handleAmbulancePassed}
+                  onAmbulanceTelemetry={handleAmbulanceTelemetry}
+                  onFiveMeterCheckpoint={handleFiveMeterCheckpoint}
+                  onAmbulanceExited={handleAmbulanceExited}
+                  onOpenControlPanel={() => setActiveTab('kontrol')}
+                />
+                <MapView
+                  ambulances={mode === 'simulasi' ? getSimulatedGpsPositions(activeAmbulances) : []}
+                />
+                <LogPanel
+                  logs={logs}
+                  mode={mode}
+                  connectedLogs={connectedLogs}
+                  onClearLogs={() => setLogs([])}
+                />
+              </div>
+
+              {/* KOLOM KANAN (Koneksi, Status, Lampu, Jalur Data) */}
+              <div className="min-[881px]:col-span-5 flex flex-col gap-6">
+                <ConnectionBar
+                  mode={mode}
+                  firebaseConnected={firebaseConnected}
+                  backendData={liveBackendStatus}
+                  esp32Data={liveEsp32Status}
+                  esp32Age={esp32Age}
+                  backendAge={backendAge}
+                />
+                <StatusCard
+                  fsmState={fsmState}
+                  mode={mode}
+                  liveEsp32Status={liveEsp32Status}
+                  localCountdown={localCountdown}
+                />
+                <LampPanel
+                  fsmState={fsmState}
+                  mode={mode}
+                  liveEsp32Status={liveEsp32Status}
+                />
+                <PipelineBar
+                  activeStep={pipelineStep}
+                  isPriorityActive={mode === 'simulasi' && activeAmbulances.length > 0 && !!prioritizedAmbulanceId}
+                  mode={mode}
+                />
+              </div>
+            </div>
+
+            {/* HALAMAN PANEL KONTROL */}
+            {activeTab === 'kontrol' && (
+              <ControlPanel
                 mode={mode}
+                fsmState={fsmState}
                 liveEsp32Status={liveEsp32Status}
+                localCountdown={localCountdown}
                 simSpeed={simSpeed}
                 isPaused={isPaused}
-                activeAmbulances={mode === 'simulasi' ? activeAmbulances : []}
-                prioritizedAmbulanceId={mode === 'simulasi' ? prioritizedAmbulanceId : null}
+                trafficScenario={trafficScenario}
+                onTrafficScenarioChange={setTrafficScenario}
+                onSpeedChange={(spd) => setSimSpeed(spd)}
+                onTogglePause={() => setIsPaused((p) => !p)}
+                onReset={handleResetSimulation}
                 queueCount={effectiveQueueCount}
                 rawQueueCount={queueCount}
                 queueDensityInfo={queueDensityInfo}
                 queueOverride={queueOverride}
                 onQueueOverrideChange={setQueueOverride}
-                onQueueCountChange={setQueueCount}
+                activeAmbulances={mode === 'simulasi' ? activeAmbulances : []}
+                prioritizedAmbulanceId={mode === 'simulasi' ? prioritizedAmbulanceId : null}
                 onCallAmbulance={handleCallAmbulance}
                 onSpawnMultiScenario={handleSpawnMultiScenario}
                 onCancelAmbulance={handleCancelAmbulance}
-                onAmbulancePassed={handleAmbulancePassed}
-                onAmbulanceTelemetry={handleAmbulanceTelemetry}
-                onFiveMeterCheckpoint={handleFiveMeterCheckpoint}
-                onAmbulanceExited={handleAmbulanceExited}
                 movementLogs={movementLogs}
                 onClearMovementLogs={() => setMovementLogs([])}
-                onSpeedChange={(spd) => setSimSpeed(spd)}
-                onTogglePause={() => setIsPaused((p) => !p)}
-                onReset={handleResetSimulation}
-              />
-              <MapView
-                ambulances={mode === 'simulasi' ? getSimulatedGpsPositions(activeAmbulances) : []}
-              />
-              <LogPanel
                 logs={logs}
-                mode={mode}
                 connectedLogs={connectedLogs}
                 onClearLogs={() => setLogs([])}
-              />
-            </div>
-
-            {/* KOLOM KANAN (Status, Lampu, Koneksi, Jalur Data) */}
-            <div className="min-[881px]:col-span-5 flex flex-col gap-6">
-              <ConnectionBar
-                mode={mode}
                 firebaseConnected={firebaseConnected}
-                backendData={liveBackendStatus}
-                esp32Data={liveEsp32Status}
                 esp32Age={esp32Age}
                 backendAge={backendAge}
               />
-              <StatusCard
-                fsmState={fsmState}
-                mode={mode}
-                liveEsp32Status={liveEsp32Status}
-                localCountdown={localCountdown}
-              />
-              <LampPanel
-                fsmState={fsmState}
-                mode={mode}
-                liveEsp32Status={liveEsp32Status}
-              />
-              <PipelineBar
-                activeStep={pipelineStep}
-                isPriorityActive={mode === 'simulasi' && activeAmbulances.length > 0 && !!prioritizedAmbulanceId}
-                mode={mode}
-              />
-            </div>
-          </div>
+            )}
+          </>
         )}
       </main>
-
-      {/* Modal Login Firebase */}
-      <Login
-        isOpen={showLogin}
-        onClose={() => setShowLogin(false)}
-        onSuccess={() => {
-          setShowLogin(false);
-          setMode('terhubung');
-        }}
-        onSwitchToSimulation={() => {
-          setShowLogin(false);
-          setMode('simulasi');
-        }}
-      />
     </div>
   );
 }
